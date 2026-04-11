@@ -1,9 +1,9 @@
-"""Code LLM — Ollama client + SEARCH/REPLACE parser."""
+"""Code LLM — OpenAI-compatible client + SEARCH/REPLACE parser."""
 
 import re
 from typing import Optional
 
-import ollama
+from openai import OpenAI, APIConnectionError, APITimeoutError, AuthenticationError
 
 
 # SEARCH/REPLACE regex — lenient: 6-8 chevrons, case-insensitive.
@@ -12,7 +12,12 @@ _SEARCH_RE = re.compile(
     re.MULTILINE | re.DOTALL | re.IGNORECASE,
 )
 
-MODEL = "qwen2.5-coder:14b"
+MODEL = "gemini-2.5-flash"
+
+BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+# Timeout for hosted LLM requests (seconds).
+REQUEST_TIMEOUT = 120.0
 
 SYSTEM_PROMPT = """\
 You are a senior coding assistant embedded in a voice-driven IDE called Voice Harness.
@@ -35,25 +40,46 @@ Rules:
 """
 
 
-def chat(query: str, context: Optional[str] = None, repo_map: Optional[str] = None) -> str:
-    """Send a user query (+ file context) to Ollama and return the full response."""
+# Context budget: Gemini 2.5 Pro supports 1M tokens; allow ~100k chars of file context.
+_MAX_CONTEXT_CHARS = 100_000
+
+
+def chat(
+    query: str,
+    context: Optional[str] = None,
+    repo_map: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> str:
+    """Send a user query (+ file context) to the hosted LLM and return the response."""
+    if not api_key:
+        raise RuntimeError("No API key configured")
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     user_parts = []
     if context:
-        user_parts.append(f"## Currently open file\n```\n{context}\n```\n")
+        truncated = context[:_MAX_CONTEXT_CHARS]
+        if len(context) > _MAX_CONTEXT_CHARS:
+            truncated += "\n... (truncated)"
+        user_parts.append(f"## Currently open file\n```\n{truncated}\n```\n")
     if repo_map:
         user_parts.append(f"## Repository map\n{repo_map}\n")
     user_parts.append(f"## User request\n{query}")
 
     messages.append({"role": "user", "content": "\n".join(user_parts)})
 
-    response = ollama.chat(
-        model=MODEL,
-        messages=messages,
-        options={"num_ctx": 4096},
-    )
-    return response["message"]["content"]
+    client = OpenAI(api_key=api_key, base_url=BASE_URL)
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except AuthenticationError as exc:
+        raise RuntimeError(f"Invalid API key: {exc}") from exc
+    except (APIConnectionError, APITimeoutError) as exc:
+        raise RuntimeError(f"LLM unavailable: {exc}") from exc
+    return response.choices[0].message.content
 
 
 def parse_search_replace(text: str) -> list[dict]:

@@ -90,6 +90,50 @@ python main.py
 
 ## Dev Tools
 
+### Audio smoke test
+
+Use the full application environment for audio diagnostics. `.venv-poc` is only for the Monaco
+POC and may not include audio dependencies such as `sounddevice`.
+
+```bash
+# Activate the full app environment first
+.venv\Scripts\activate
+
+# List output devices without attempting playback
+python tools/test_audio.py --list-only
+
+# Run the sine-wave probe and Kokoro probe on the default output device
+python tools/test_audio.py
+
+# Target a specific output device index if needed
+python tools/test_audio.py --device 3
+```
+
+The tool warns if it is run outside Python 3.11.x because the real audio stack is only supported
+there.
+The `--device` index matches the value consumed by `TtsNavigator.set_output_device()` in the app.
+
+### Microphone smoke test
+
+Use the full application environment for microphone diagnostics as well.
+
+```bash
+# Activate the full app environment first
+.venv\Scripts\activate
+
+# List input devices without recording
+python tools/test_mic.py --list-only
+
+# Record a short sample and print amplitude stats
+python tools/test_mic.py
+
+# Target a specific microphone and attempt one RealtimeSTT transcription
+python tools/test_mic.py --device 2 --transcribe
+```
+
+The `--device` index matches the value consumed by the coordinator-owned microphone
+configuration path.
+
 ### Phase 0 POC (standalone Monaco test)
 
 ```bash

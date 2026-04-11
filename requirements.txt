@@ -15,20 +15,29 @@ PyQt6-WebEngine>=6.6.0,<6.8.0   # Separate package — easy to miss; included fr
 # Do NOT let pip resolve them here or you get CPU-only builds.
 RealtimeSTT>=0.3.104
 ctranslate2==4.4.0               # Pin: >=4.5.0 needs cuDNN 9.2 which conflicts on RTX 4080 setup
+onnxruntime>=1.18.0,<1.19.0      # Pin: >=1.19 DLL conflicts with QtWebEngine on Windows
 webrtcvad-wheels>=2.0.14         # Use -wheels variant: has prebuilt Windows wheels for Python 3.11
 soundfile>=0.12.0
+sounddevice>=0.4.6               # Audio playback for TTS (used by harness/tts.py)
 
 # --- Wake Word ---
 openwakeword>=0.6.0              # Must be >=0.6.0; RealtimeSTT's setup.py floor is too low
 
 # --- LLM ---
-ollama>=0.2.0                    # Python client for Ollama REST API (localhost:11434)
+openai>=1.30.0                   # OpenAI-compatible SDK (used with Gemini endpoint)
 
 # --- TTS ---
 kokoro>=0.9.0                    # hexgrad/kokoro — Apache 2.0; requires espeak-ng system binary on Windows
+
+# --- Git ---
+gitpython>=3.1.40                # Auto-commit accepted edits (Phase 3a)
 
 # --- Git integration ---
 gitpython>=3.1.40
 
 # --- Code intelligence (Phase 3b) ---
-tree-sitter>=0.21.0
+tree-sitter-languages>=1.10.0   # Bundles tree-sitter + pre-compiled language grammars
+
+# --- Testing ---
+pytest>=7.0.0
+numpy>=1.24.0                    # Test fixtures (mock audio arrays)

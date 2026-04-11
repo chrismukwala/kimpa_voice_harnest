@@ -4,17 +4,15 @@ Voice Harness — Installation Wizard
 Run this ONCE before any other step.
 
 Steps (in required order):
-  1.  Pre-flight: Python 3.11.x, git, espeak-ng, nvcc, Ollama
+  1.  Pre-flight: Python 3.11.x, git, espeak-ng, nvcc
   2.  Create .venv
   3.  Install CUDA PyTorch FIRST (before anything else touches torch)
   4.  Pin ctranslate2==4.4.0
   5.  Install all other requirements
-  6.  Pull Ollama model (~8 GB)
-  7.  Validation suite — prints ✓/✗ per component
+  6.  Validation suite — prints ✓/✗ per component
 
 Usage:
     python setup/install.py
-    python setup/install.py --skip-model   (skip the 8GB model download)
 """
 
 import subprocess
@@ -117,19 +115,6 @@ def step_preflight():
         )
         # Not a hard block — we warn but continue
 
-    # Ollama
-    if shutil.which("ollama"):
-        r = run(["ollama", "--version"], capture=True)
-        ok(f"Ollama: {r.stdout.strip()}")
-        warn("Ensure Ollama version is ≤0.19.x — version 0.20.x has a VRAM regression on Windows.")
-    else:
-        fail(
-            "Ollama not found — install from https://ollama.com/download\n"
-            "    After install, run: ollama serve  (or let it start on login)\n"
-            "    Ensure Ollama ≤0.19.x (0.20.x has a Windows VRAM regression)."
-        )
-        passed = False
-
     if not passed:
         print(f"\n{RED}{BOLD}Pre-flight failed. Fix the issues above and re-run.{RESET}")
         sys.exit(1)
@@ -174,27 +159,8 @@ def step_requirements():
     ok("requirements.txt installed")
 
 
-def step_model(skip: bool):
-    header("Step 6 — Ollama model pull")
-    if skip:
-        warn("--skip-model passed — skipping model download")
-        return
-
-    model = "qwen2.5-coder:14b"
-    print(f"\n  This will download ~8 GB for model '{model}'.")
-    print(f"  Ensure at least 10 GB free on C: (or set OLLAMA_MODELS env var to another drive).")
-    answer = input("  Continue? [y/N] ").strip().lower()
-    if answer != "y":
-        warn("Skipped model download — run 'ollama pull qwen2.5-coder:14b' manually before starting.")
-        return
-
-    print(f"  Pulling {model}...")
-    run(["ollama", "pull", model])
-    ok(f"{model} downloaded")
-
-
 def step_validate():
-    header("Step 7 — Validation suite")
+    header("Step 6 — Validation suite")
     py = str(venv_python())
     results = []
 
@@ -205,7 +171,7 @@ def step_validate():
         ("PyQt6-WebChannel", "import PyQt6.QtWebChannel"),
         ("RealtimeSTT",  "import RealtimeSTT"),
         ("kokoro",       "import kokoro"),
-        ("ollama",       "import ollama"),
+        ("openai",       "import openai"),
         ("gitpython",    "import git"),
         ("openwakeword", "import openwakeword"),
     ]
@@ -218,21 +184,6 @@ def step_validate():
         else:
             fail(f"{name} — {r.stderr.strip()[:120]}")
             results.append((name, False))
-
-    # Ollama connectivity (pure Python — no curl dependency)
-    try:
-        import urllib.request
-        with urllib.request.urlopen("http://localhost:11434", timeout=5) as resp:
-            body = resp.read().decode()
-        if "Ollama" in body:
-            ok("Ollama API reachable at localhost:11434")
-            results.append(("Ollama API", True))
-        else:
-            fail("Ollama API responded but unexpected body — is this Ollama?")
-            results.append(("Ollama API", False))
-    except Exception as e:
-        fail(f"Ollama API not reachable — is 'ollama serve' running? ({e})")
-        results.append(("Ollama API", False))
 
     # espeak-ng runtime check
     if shutil.which("espeak-ng") or shutil.which("espeak"):
@@ -257,7 +208,6 @@ def step_validate():
 # ------------------------------------------------------------------ main
 def main():
     parser = argparse.ArgumentParser(description="Voice Harness setup wizard")
-    parser.add_argument("--skip-model", action="store_true", help="Skip the 8 GB Ollama model download")
     args = parser.parse_args()
 
     print(f"\n{BOLD}Voice Harness — Installation Wizard{RESET}")
@@ -275,7 +225,6 @@ def main():
     step_pytorch()
     step_ctranslate2()
     step_requirements()
-    step_model(args.skip_model)
     step_validate()
 
 

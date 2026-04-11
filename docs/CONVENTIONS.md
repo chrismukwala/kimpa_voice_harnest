@@ -68,6 +68,38 @@ Always: `{"query": str, "context": str | None, "repo_map": str | None}`. Never p
 - Font: Consolas, monospace, 12px for editor, 11px for panels
 - Status colors: idle=`#608b4e`, listening=`#4ec9b0`, processing=`#dcdcaa`, speaking=`#ce9178`
 
+## Testing — Red/Green/Refactor TDD
+
+This project follows a **Red → Green → Refactor** TDD workflow:
+
+1. **Red**: Write a failing test that describes the desired behaviour.
+2. **Green**: Write the minimum code to make the test pass.
+3. **Refactor**: Clean up while keeping all tests green.
+
+### Rules
+
+- Every new feature or bug fix starts with a test — code without a test is unfinished.
+- Run `python -m pytest tests/ -v` before committing. All tests must pass.
+- Tests live in `tests/` mirroring `harness/` and `ui/` structure.
+- Use `unittest.mock.patch` to isolate from heavy dependencies (Ollama, RealtimeSTT, Kokoro, sounddevice).
+- UI widget tests use the `qapp` fixture (session-scoped `QApplication`).
+- Mark UI tests with `@pytest.mark.ui`.
+- Tests must be fast — mock all I/O, network, and hardware. No real mic, GPU, or Ollama calls in unit tests.
+- Test file naming: `test_<module>.py` matching the source module.
+
+### Test Commands
+
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run only fast (non-UI) tests
+python -m pytest tests/ -v -m "not ui"
+
+# Run a single test file
+python -m pytest tests/test_code_llm.py -v
+```
+
 ## Documentation
 
 - Update `docs/PROGRESS.md` after completing any phase or significant work

@@ -16,7 +16,7 @@ A standalone desktop coding assistant driven entirely by voice. Voice Harness re
 
 ### Functional
 
-- Wake word detection ("Hey Harness" — custom trained in Phase 4; `hey_jarvis` placeholder until then)
+- Wake word detection ("Hey Harness" — custom trained in Phase 4; `hey_jarvis` placeholder until then; temporarily disable-able during stabilization)
 - Continuous voice-to-text transcription (RealtimeSTT + faster-whisper large-v3)
 - Code LLM queries with file context and repo map (Ollama + Qwen2.5-Coder:14b)
 - SEARCH/REPLACE edit parsing with fuzzy fallback and syntax validation

@@ -31,15 +31,15 @@ Mic → VoiceInput (RealtimeSTT)
    │  1. STT text arrives (or manual text input)              │
    │  2. context_assembler [stub: pass-through]               │
    │     → Builds: {"query", "context", "repo_map"}          │
-   │  3. code_llm.chat() → Ollama → full response text       │
+   │  3. code_llm.chat() → Gemini 2.5 Pro → full response text  │
    │  4. response_splitter [stub: pass-through]               │
    │     → Separates prose from SEARCH/REPLACE blocks         │
    │  5. tts.speak(prose) → List[Tuple[str, bytes]]          │
-   │  6. Play WAV chunks sequentially                         │
+   │  6. Emit TTS chunks to UI playback owner                 │
    └─────────────────────────────────────────────────────────┘
-        │                                │
-        ▼                                ▼
-   Qt Signals → UI updates         Audio output
+        │
+        ▼
+   Qt Signals → UI updates → TtsNavigator playback
 ```
 
 ### Message Format (from day 1)
@@ -59,14 +59,24 @@ This format is intentionally over-specified for Phase 1 so that Phase 3 doesn't 
 ### `harness/voice_input.py`
 - **Only file that imports RealtimeSTT** — thin adapter pattern
 - Public API: `start()`, `stop()`, `pause()`, `resume()`, `on_text(callback)`
+- Supports input-device reconfiguration, wake-word enable/disable, error callbacks, and
+     recording-state callbacks for coordinator wiring
 - If RealtimeSTT needs replacing, only this ~80-line file changes
 
+### `harness/audio_settings.py`
+- Shared persistence seam for input device, output device, and wake-word mode via `QSettings`
+- Keeps persistence out of `AiPanel`
+
+### `harness/audio_devices.py`
+- Enumerates input/output devices through `sounddevice`
+- Exposes default-device lookup for startup selection
+
 ### `harness/code_llm.py`
-- Ollama client with system prompt enforcing SEARCH/REPLACE format
-- `chat(query, context, repo_map) → str` — full LLM response
+- Gemini 2.5 Pro client via OpenAI-compatible SDK
+- `chat(query, context, repo_map, api_key) → str` — full LLM response
 - `parse_search_replace(text) → list[dict]` — lenient regex parser (6-8 chevrons)
 - `extract_prose(text) → str` — strips edit blocks, returns TTS-ready prose
-- Ollama context capped at `num_ctx=4096` to fit VRAM budget
+- Context budget: 100,000 chars (Gemini supports 1M tokens)
 
 ### `harness/tts.py`
 - Kokoro wrapper running on CPU (82M params, fast enough)
@@ -79,11 +89,25 @@ This format is intentionally over-specified for Phase 1 so that Phase 3 doesn't 
 - Background thread processes queue items
 - `context_assembler` and `response_splitter` are currently pass-through stubs
 - Manages voice lifecycle: start/stop/pause/resume
+- Owns semantic TTS lifecycle via `begin_tts_playback()` / `finish_tts_playback()`
+- Owns microphone reconfiguration via `set_input_device()` / `set_wake_word_enabled()`
+- Emits explicit `recording_active_changed(bool)` for listening-state UI
+- Does not play audio directly; it emits synthesized chunks for the UI playback owner
+
+### `harness/tts_navigator.py`
+- Executes sentence-level TTS playback on the UI side
+- Emits completion when playback finishes
+- Emits `playback_error(str)` so audio failures surface into the UI
+- Supports an explicit output-device override for future audio settings
+- Emits heuristic word-highlighting updates during playback
+- Guards against stale completion from interrupted playback sessions
 
 ### `ui/main_window.py`
 - QSplitter with 3 panels: QTreeView (220px) | EditorPanel (700px) | AiPanel (380px)
 - Wires coordinator signals → AI panel display
 - Wires file tree double-click → editor load + coordinator context update
+- Owns playback policy: autoplay on fresh chunks, manual replay, and stop / completion wiring
+- Applies persisted audio settings to coordinator and TTS navigator on startup
 
 ### `ui/editor_panel.py`
 - Phase 1: QPlainTextEdit with Consolas font, dark theme
@@ -96,6 +120,8 @@ This format is intentionally over-specified for Phase 1 so that Phase 3 doesn't 
 - Manual text input with Send button (fallback when mic unavailable)
 - Pause Listening toggle button (red when active, green when paused)
 - Emits `text_submitted(str)` and `pause_toggled(bool)` signals
+- Contains collapsible audio settings, a flashing listening indicator, and HTML TTS word
+     highlighting
 
 ## Monaco Integration (Phase 0 proven, Phase 2b wiring)
 
@@ -126,15 +152,15 @@ Monaco is served via a localhost HTTP server (daemon thread), NOT via `file://` 
 
 ```
 RTX 4080 Laptop — 12GB VRAM
-├── Qwen2.5-Coder:14b Q4_K_M    ~9.0 GB  (Ollama, ctx=4096)
 ├── faster-whisper large-v3       ~1.5 GB  (int8_float16 — NOT fp16!)
 ├── OS + PyQt6 + Chromium         ~1.0 GB
 └── Kokoro-82M                    0.0 GB   (CPU)
                                  ──────
-                         Total   ~11.5 GB   ✓ fits
+                         Total   ~2.5 GB   ✓ comfortable
 ```
 
-**fp16 whisper would use 3.1GB → 13.4GB total → over budget.**
+**Gemini 2.5 Pro runs in the cloud — no local VRAM needed for LLM.**
+**Previously: Ollama + Qwen2.5-Coder:14b consumed ~9 GB, leaving only ~1.5 GB headroom.**
 
 ## Threading Model
 

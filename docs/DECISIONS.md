@@ -52,7 +52,7 @@
 
 **Rationale**: Well-tested format that Qwen2.5-Coder understands reliably. More precise than unified diffs (LLMs often generate invalid diffs). Easier to parse with regex. Each block is self-contained — no line numbers to get wrong.
 
-**Parser details**: Lenient regex (6-8 chevrons, case-insensitive), strip enclosing fenced code blocks, fuzzy fallback via `difflib.SequenceMatcher` at ~0.85 threshold with user confirmation.
+**Parser details**: Lenient regex (6-8 chevrons, case-insensitive), strip enclosing fenced code blocks, fuzzy fallback via `difflib.SequenceMatcher` at 0.85 threshold. `EditResult.used_fuzzy` flag indicates when fuzzy matching was used, enabling UI warnings.
 
 ---
 
@@ -76,7 +76,7 @@
 
 **Decision**: Use `compute_type="int8_float16"` for faster-whisper large-v3.
 
-**Rationale**: VRAM budget is 12GB total. fp16 whisper uses ~3.1GB, which combined with Qwen2.5-Coder:14b (~9.0GB) would total ~13.1GB — over budget. int8_float16 uses ~1.5GB, putting the total at ~11.5GB which fits.
+**Rationale**: VRAM budget is 12GB total. fp16 whisper uses ~3.1GB, which when combined with a local LLM would leave little headroom. int8_float16 uses ~1.5GB — a safer choice regardless of what else shares the GPU. (Originally chosen to fit alongside Qwen2.5-Coder:14b ~9 GB; still preferred after LLM moved to cloud in ADR-011.)
 
 **Quality impact**: Minimal — int8 quantization on Whisper has negligible WER degradation for English speech.
 
@@ -103,3 +103,24 @@
 - `openwakeword` — compatibility issues with 3.12+ numpy/onnxruntime versions
 
 The `webrtcvad-wheels` variant provides pre-built Windows wheels for 3.11 but not 3.12.
+
+---
+
+## ADR-011: Gemini 2.5 Pro via OpenAI SDK (replacing Ollama)
+
+**Decision**: Replace local Ollama + Qwen2.5-Coder:14b with hosted Gemini 2.5 Pro, accessed via the `openai` Python SDK pointed at Google's OpenAI-compatible endpoint.
+
+**Rationale**: Running both faster-whisper STT (~1.5 GB) and Qwen2.5-Coder:14b (~9 GB) on a 12 GB GPU left only ~1.5 GB headroom, causing VRAM pressure and slow inference. Moving the LLM to a hosted service frees ~9 GB VRAM, dramatically improves inference speed, and unlocks a much larger context window (100k chars vs 4k tokens).
+
+**Why Gemini 2.5 Pro**: Strong coding performance, generous free tier, 1M token context window. The OpenAI-compatible endpoint (`https://generativelanguage.googleapis.com/v1beta/openai/`) means the `openai` SDK works directly — no Gemini-specific SDK needed.
+
+**Why OpenAI SDK**: Maximum provider portability. If the user wants to switch to OpenAI, Anthropic (via proxy), or any OpenAI-compatible endpoint, only `MODEL` and `BASE_URL` constants need changing.
+
+**API key management**: Persisted in QSettings (`"llm/api_key"`). Env var `GEMINI_API_KEY` as fallback. UI text field in AI panel's LLM Settings section. Coordinator emits `error_occurred` if no key is configured — no blocking dialog.
+
+**Trade-off**: The app is no longer fully offline. STT and TTS remain local. The LLM requires an internet connection and an API key.
+
+**Alternatives rejected**:
+- Keep Ollama — VRAM too tight, inference too slow for interactive use
+- Gemini Python SDK (`google-genai`) — less portable, extra dependency for same outcome
+- Anthropic Claude — no OpenAI-compatible endpoint without a proxy

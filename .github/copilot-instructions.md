@@ -21,6 +21,13 @@ This is a standalone desktop voice-driven coding assistant built with Python 3.1
 - Stage specific files in git — never `git add .`.
 - Commit format: `type: description` (feat, fix, refactor, docs, test, chore).
 
+## TDD workflow
+
+- **Red → Green → Refactor** — every feature/fix starts with a failing test.
+- Run `python -m pytest tests/ -v` before committing — all tests must pass.
+- Mock heavy dependencies (OpenAI SDK, RealtimeSTT, Kokoro, sounddevice) — tests must be fast.
+- UI tests use the `qapp` fixture and `@pytest.mark.ui`.
+
 ## After changes
 
 Update `docs/PROGRESS.md` with what was completed.

@@ -2,10 +2,28 @@
 
 import re
 import io
+import threading
 import wave
 from typing import List, Tuple
 
+import numpy as np
 import soundfile as sf
+
+
+# Lazy singleton for Kokoro pipeline — avoids reloading the 82M model every call.
+_pipeline_lock = threading.Lock()
+_pipeline = None
+
+
+def _get_pipeline():
+    """Return the shared KPipeline instance, creating it on first call."""
+    global _pipeline
+    if _pipeline is None:
+        with _pipeline_lock:
+            if _pipeline is None:
+                from kokoro import KPipeline
+                _pipeline = KPipeline(lang_code="a")
+    return _pipeline
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -20,9 +38,7 @@ def speak(text: str) -> List[Tuple[str, bytes]]:
     Each wav_bytes is a complete WAV file in memory.
     Phase 4 adds arrow-key navigation over this list.
     """
-    from kokoro import KPipeline
-
-    pipeline = KPipeline(lang_code="a")  # American English
+    pipeline = _get_pipeline()
     sentences = _split_sentences(text)
     if not sentences:
         return []
@@ -37,7 +53,6 @@ def speak(text: str) -> List[Tuple[str, bytes]]:
             # sample rate comes from the pipeline, usually 24000
         if not audio_chunks:
             continue
-        import numpy as np
         combined = np.concatenate(audio_chunks)
         buf = io.BytesIO()
         sf.write(buf, combined, sample_rate, format="WAV")

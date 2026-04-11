@@ -5,7 +5,7 @@
 
 ## What is this project?
 
-Voice Harness is a standalone desktop voice-driven coding assistant that replaces VS Code entirely. The user speaks a command; the system transcribes it (STT), sends it plus file context to a local Code LLM, receives SEARCH/REPLACE edit blocks + prose, shows edits as a diff for accept/reject, and reads the prose aloud (TTS). Everything runs locally on the user's machine — no cloud APIs.
+Voice Harness is a standalone desktop voice-driven coding assistant that replaces VS Code entirely. The user speaks a command; the system transcribes it (STT), sends it plus file context to a hosted Code LLM, receives SEARCH/REPLACE edit blocks + prose, shows edits as a diff for accept/reject, and reads the prose aloud (TTS). STT and TTS run locally; the LLM uses Gemini 2.5 Pro via API.
 
 ## Tech stack
 
@@ -14,7 +14,7 @@ Voice Harness is a standalone desktop voice-driven coding assistant that replace
 | UI framework | PyQt6 + PyQt6-WebEngine |
 | Code editor | Monaco Editor 0.52.0 (AMD build) via QWebEngineView + QWebChannel |
 | STT | RealtimeSTT (wraps faster-whisper large-v3 + Silero VAD) |
-| Code LLM | Ollama + Qwen2.5-Coder:14b (local, 4096 ctx) |
+| Code LLM | Gemini 2.5 Pro via OpenAI SDK (hosted, 100k char context) |
 | TTS | Kokoro-82M (CPU, Apache 2.0) |
 | Edit format | Aider-style SEARCH/REPLACE blocks |
 | Git | gitpython — auto-commit accepted changes |
@@ -23,7 +23,6 @@ Voice Harness is a standalone desktop voice-driven coding assistant that replace
 
 - **Python 3.11.x required** — 3.12+ breaks webrtcvad and OpenWakeWord
 - **CUDA toolkit** — nvcc must be on PATH
-- **Ollama** — must be running at localhost:11434
 - **espeak-ng** — must be installed and on PATH (Kokoro dependency)
 - **Windows 11** — primary target platform (Razer Blade 16, RTX 4080 12GB)
 
@@ -36,9 +35,25 @@ python setup/install.py
 # Run the app
 python main.py
 
+# Run all tests (TDD — do this before every commit)
+python -m pytest tests/ -v
+
+# Manual audio diagnostics (full .venv only)
+python tools/test_audio.py
+python tools/test_mic.py
+
 # Run Phase 0 Monaco POC (standalone test)
 python phase0_poc/monaco_poc.py
 ```
+
+## Development workflow — Red/Green/Refactor TDD
+
+1. **Red**: Write a failing test in `tests/` that describes the new behaviour.
+2. **Green**: Write the minimum production code to make it pass.
+3. **Refactor**: Clean up while all tests stay green.
+4. Run `python -m pytest tests/ -v` — all tests must pass before committing.
+
+Every new feature or bug fix starts with a test. Code without a test is unfinished.
 
 ## Project layout
 
@@ -46,20 +61,37 @@ python phase0_poc/monaco_poc.py
 voice_harnest/
 ├── main.py                    # Entry point (if __name__ == '__main__' guard required)
 ├── AGENTS.md                  # This file
+├── pytest.ini                 # Pytest configuration
 ├── requirements.txt           # Deps — do NOT pip install directly; use setup/install.py
 ├── setup/
-│   └── install.py             # 7-step installation wizard
+│   └── install.py             # 6-step installation wizard
 ├── harness/
+│   ├── audio_devices.py       # sounddevice device enumeration helpers
+│   ├── audio_settings.py      # QSettings-backed audio persistence seam
 │   ├── coordinator.py         # Queue pipeline: STT → context_assembler → LLM → response_splitter → TTS
 │   ├── voice_input.py         # Thin RealtimeSTT adapter — ONLY file that imports RealtimeSTT
-│   ├── code_llm.py            # Ollama client + SEARCH/REPLACE parser
-│   └── tts.py                 # Kokoro: speak(text) → List[Tuple[str, bytes]]
+│   ├── code_llm.py            # Gemini client (OpenAI SDK) + SEARCH/REPLACE parser
+│   ├── tts.py                 # Kokoro: speak(text) → List[Tuple[str, bytes]]
+│   └── tts_navigator.py       # TTS playback, navigation, speed, highlighting
+├── tools/
+│   ├── test_audio.py          # Manual TTS audio smoke test
+│   └── test_mic.py            # Manual microphone/STT smoke test
 ├── ui/
 │   ├── main_window.py         # 3-panel layout: file tree | editor | AI panel
 │   ├── editor_panel.py        # QPlainTextEdit placeholder (Monaco in Phase 2b)
-│   └── ai_panel.py            # Voice status, response log, manual input, pause button
+│   └── ai_panel.py            # Voice status, response log, audio settings, TTS UI
 ├── phase0_poc/
 │   └── monaco_poc.py          # Monaco ↔ QWebChannel round-trip POC (PASSED)
+├── tests/
+│   ├── conftest.py            # Shared fixtures (qapp for UI tests)
+│   ├── test_code_llm.py       # SEARCH/REPLACE parser + prose extraction tests
+│   ├── test_tts.py            # Sentence splitter + speak contract tests
+│   ├── test_voice_input.py    # VoiceInput adapter API tests
+│   ├── test_coordinator.py    # Message format + pipeline tests
+│   ├── test_audio_devices.py  # sounddevice enumeration tests
+│   ├── test_audio_settings.py # persisted audio-settings seam tests
+│   ├── test_editor_panel.py   # EditorPanel widget tests
+│   └── test_ai_panel.py       # AiPanel widget + signal tests
 ├── assets/
 │   └── monaco/min/            # Monaco 0.52.0 AMD build (loader.js + vs/)
 └── docs/                      # Full project documentation
@@ -81,11 +113,12 @@ voice_harnest/
 6. **Only `voice_input.py` imports RealtimeSTT** — thin adapter pattern so the library can be swapped.
 7. **Coordinator message format**: `{"query": str, "context": str|None, "repo_map": str|None}` — never plain strings.
 8. **`tts.py` returns `List[Tuple[str, bytes]]`** — sentence-split WAV chunks, required for Phase 4 arrow-key navigation.
-9. **VRAM budget is 12GB** — faster-whisper must use `compute_type="int8_float16"` (NOT fp16). Ollama context capped at 4096.
-10. **GPL v3 license** — required by PyQt6 unless Riverbank commercial license purchased.
+9. **VRAM budget is 12GB** — faster-whisper must use `compute_type="int8_float16"` (NOT fp16). LLM runs in the cloud (Gemini 2.5 Pro) — no local VRAM needed.
+10. **Apache 2.0 license** — see LICENSE file. Note: PyQt6 itself is GPL v3.
 
 ## After completing work
 
+- Run `python -m pytest tests/ -v` — all tests must pass.
 - Update `docs/PROGRESS.md` with what you changed and the new phase status.
-- Commit with a conventional commit message: `feat:`, `fix:`, `refactor:`, `docs:`.
+- Commit with a conventional commit message: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`.
 - Do NOT run `git add .` or `git add -A` — stage specific files only.
