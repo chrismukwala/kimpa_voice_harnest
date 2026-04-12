@@ -53,6 +53,7 @@ def main() -> None:
 
     window.show()
 
+    coordinator.set_ptt_mode(True)  # PTT + two-stage confirmation is the default input mode
     coordinator.start()
     code = app.exec()
 

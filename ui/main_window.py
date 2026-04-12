@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         # --- Wire coordinator signals → UI ---
         coordinator.state_changed.connect(self._ai_panel.set_state)
         coordinator.recording_active_changed.connect(self._ai_panel.set_recording_active)
-        coordinator.transcription_ready.connect(self._ai_panel.append_transcription)
+        coordinator.transcription_ready.connect(self._ai_panel.populate_query)
         coordinator.llm_response_ready.connect(self._ai_panel.append_response)
         coordinator.error_occurred.connect(
             lambda msg: self._ai_panel.append_response(f"⚠ Error: {msg}")
@@ -157,6 +157,8 @@ class MainWindow(QMainWindow):
         # --- Wire UI → coordinator ---
         self._ai_panel.text_submitted.connect(self._on_manual_query)
         self._ai_panel.pause_toggled.connect(self._on_pause_toggle)
+        self._ai_panel.ptt_pressed.connect(coordinator.ptt_press)
+        self._ai_panel.ptt_released.connect(coordinator.ptt_release)
         self._ai_panel.input_device_changed.connect(self._on_input_device_changed)
         self._ai_panel.output_device_changed.connect(self._on_output_device_changed)
         self._ai_panel.wake_word_toggled.connect(self._on_wake_word_toggled)
@@ -246,6 +248,7 @@ class MainWindow(QMainWindow):
     # Manual query
     # ------------------------------------------------------------------
     def _on_manual_query(self, text: str):
+        self._ai_panel.append_transcription(text)
         self._sync_editor_context()
         self._coordinator.submit_text(text)
 

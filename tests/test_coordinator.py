@@ -10,6 +10,19 @@ import pytest
 from harness.coordinator import Coordinator
 
 
+class _SyncThread:
+    """Thread stand-in that runs its target synchronously — for TTS signal tests."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None, **_):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+
+
 @pytest.fixture
 def coordinator():
     """Create a Coordinator with mocked VoiceInput (no mic required)."""
@@ -76,6 +89,35 @@ class TestSubmitText:
         coordinator.submit_text("manual query")
         msg = coordinator._queue.get_nowait()
         assert msg["query"] == "manual query"
+
+    def test_stt_text_does_not_enqueue(self, coordinator):
+        """STT text goes to the preview box — the user confirms with Send."""
+        coordinator._on_stt_text("hello world test")
+        import queue as _q
+        with pytest.raises(_q.Empty):
+            coordinator._queue.get_nowait()
+
+    def test_stt_text_emits_transcription_ready(self, coordinator):
+        received = []
+        coordinator.transcription_ready.connect(lambda t: received.append(t))
+        coordinator._on_stt_text("hello world test")
+        assert received == ["hello world test"]
+
+
+class TestPTT:
+    """Push-to-talk proxy methods forward to VoiceInput."""
+
+    def test_ptt_press_calls_voice(self, coordinator):
+        coordinator.ptt_press()
+        coordinator._voice.ptt_press.assert_called_once()
+
+    def test_ptt_release_calls_voice(self, coordinator):
+        coordinator.ptt_release()
+        coordinator._voice.ptt_release.assert_called_once()
+
+    def test_set_ptt_mode_calls_voice(self, coordinator):
+        coordinator.set_ptt_mode(True)
+        coordinator._voice.set_ptt_mode.assert_called_once_with(True)
 
 
 class TestLifecycle:
@@ -210,7 +252,8 @@ class TestProcessMessage:
 
         coordinator._api_key = "test-key"
         msg = {"query": "fix it", "context": None, "repo_map": None}
-        coordinator._process_message(msg)
+        with patch("harness.coordinator.threading.Thread", new=_SyncThread):
+            coordinator._process_message(msg)
 
         assert len(received) == 1
         assert received[0] == [("I fixed the bug.", b"wav")]
@@ -387,7 +430,8 @@ class TestResponseSplitter:
         coordinator._api_key = "test-key"
         coordinator.set_file_context("/f.py", "old\n")
         msg = {"query": "fix", "context": "old\n", "repo_map": None}
-        coordinator._process_message(msg)
+        with patch("harness.coordinator.threading.Thread", new=_SyncThread):
+            coordinator._process_message(msg)
 
         assert len(chunks_received) == 1
         assert chunks_received[0][0] == "Here's the fix."
@@ -588,7 +632,8 @@ class TestTtsChunksSignal:
         coordinator._api_key = "test-key"
 
         msg = {"query": "fix", "context": None, "repo_map": None}
-        coordinator._process_message(msg)
+        with patch("harness.coordinator.threading.Thread", new=_SyncThread):
+            coordinator._process_message(msg)
 
         assert len(received) == 1
         assert received[0] == [("I fixed it.", b"wav")]
@@ -644,7 +689,7 @@ class TestTtsChunksSignal:
         msg = {"query": "fix", "context": None, "repo_map": None}
         coordinator._process_message(msg)
 
-        assert states == ["processing"]
+        assert states == ["processing", "listening"]
         assert started == []
         assert finished == []
 
@@ -733,6 +778,7 @@ class TestStreamingPipeline:
             mock_llm, mock_tts,
             ["First. ", "Second."],
             sentences=["First.", "Second."],
+            prose="First. Second.",
         )
 
         received = []
@@ -740,7 +786,8 @@ class TestStreamingPipeline:
 
         coordinator._api_key = "test-key"
         msg = {"query": "hello", "context": None, "repo_map": None}
-        coordinator._process_message(msg)
+        with patch("harness.coordinator.threading.Thread", new=_SyncThread):
+            coordinator._process_message(msg)
 
         assert len(received) == 2
         assert received[0] == ("First.", b"wav")

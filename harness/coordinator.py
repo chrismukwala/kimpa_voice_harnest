@@ -104,6 +104,18 @@ class Coordinator(QObject):
         """Apply a new microphone device through the voice adapter."""
         self._voice.set_input_device(device_index)
 
+    def set_ptt_mode(self, enabled: bool) -> None:
+        """Switch the voice input between push-to-talk and VAD mode."""
+        self._voice.set_ptt_mode(enabled)
+
+    def ptt_press(self) -> None:
+        """Forward PTT button press to the voice input."""
+        self._voice.ptt_press()
+
+    def ptt_release(self) -> None:
+        """Forward PTT button release to the voice input."""
+        self._voice.ptt_release()
+
     def set_wake_word_enabled(self, enabled: bool) -> None:
         """No-op — wake word support removed in Phase 5."""
         pass
@@ -169,7 +181,8 @@ class Coordinator(QObject):
             self.transcription_ready.emit(text)
         except RuntimeError:
             return
-        self._enqueue(text)
+        # Intentionally NOT calling _enqueue here.
+        # STT text goes to the UI preview box; the user reviews and clicks Send.
 
     def _on_voice_error(self, message: str) -> None:
         try:
@@ -297,23 +310,19 @@ class Coordinator(QObject):
             self.state_changed.emit("listening")
             return
 
-        # --- Streaming LLM → sentence detection → TTS pipeline ---
-        full_response_parts: list[str] = []
+        # --- Stream full LLM response ---
+        try:
+            full_response = "".join(
+                code_llm.chat_stream_raw(
+                    query, context=context, repo_map=repo_map, api_key=api_key
+                )
+            )
+        except RuntimeError as exc:
+            self.error_occurred.emit(str(exc))
+            self.state_changed.emit("listening")
+            return
 
-        def _capturing_stream():
-            for chunk in code_llm.chat_stream_raw(
-                query, context=context, repo_map=repo_map, api_key=api_key
-            ):
-                full_response_parts.append(chunk)
-                yield chunk
-
-        sentences = code_llm.split_sentences_streaming(_capturing_stream())
-        tts_chunks: list = []
-        for sentence, wav_bytes in tts_mod.speak_stream(sentences):
-            tts_chunks.append((sentence, wav_bytes))
-            self.tts_chunk_ready.emit(sentence, wav_bytes)
-
-        full_response = "".join(full_response_parts)
+        # Emit response to UI immediately — pipeline is now free.
         self.llm_response_ready.emit(full_response)
 
         # --- response_splitter (Phase 3a) ---
@@ -339,9 +348,29 @@ class Coordinator(QObject):
                 for err in result.errors:
                     self.error_occurred.emit(f"Edit failed: {err}")
 
-        # --- Emit collected chunks for backward compat ---
-        if tts_chunks:
-            self.tts_chunks_ready.emit(tts_chunks)
-            return
-
+        # (Option B) Always return to listening before TTS starts.
         self.state_changed.emit("listening")
+
+        # (Option A) TTS runs in its own thread — does not block the pipeline.
+        if prose:
+            tts_thread = threading.Thread(
+                target=self._run_tts, args=(prose,), daemon=True
+            )
+            tts_thread.start()
+
+    def _run_tts(self, prose: str) -> None:
+        """Synthesise *prose* via Kokoro and emit chunks — runs in a dedicated thread."""
+        try:
+            sentences = code_llm.split_sentences_streaming(iter([prose]))
+            tts_chunks: list = []
+            for sentence, wav_bytes in tts_mod.speak_stream(sentences):
+                tts_chunks.append((sentence, wav_bytes))
+                self.tts_chunk_ready.emit(sentence, wav_bytes)
+            if tts_chunks:
+                self.tts_chunks_ready.emit(tts_chunks)
+        except Exception as exc:
+            log.warning("TTS synthesis failed: %s", exc)
+            try:
+                self.error_occurred.emit(f"TTS error: {exc}")
+            except RuntimeError:
+                pass

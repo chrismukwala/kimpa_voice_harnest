@@ -25,6 +25,8 @@ class AiPanel(QWidget):
 
     text_submitted = pyqtSignal(str)       # user typed a manual query
     pause_toggled = pyqtSignal(bool)       # True = paused, False = resumed
+    ptt_pressed = pyqtSignal()             # push-to-talk button held
+    ptt_released = pyqtSignal()            # push-to-talk button released
     tts_play_requested = pyqtSignal()
     tts_stop_requested = pyqtSignal()
     tts_prev_requested = pyqtSignal()
@@ -261,6 +263,18 @@ class AiPanel(QWidget):
         input_row.addWidget(send_btn)
         layout.addLayout(input_row)
 
+        # --- PTT button ---
+        self._ptt_btn = QPushButton("Hold to Talk")
+        self._ptt_btn.setStyleSheet(
+            "QPushButton { background:#2d6a2d; color:white; padding:6px 16px;"
+            " font-weight:bold; border-radius:3px; border:none; }"
+            "QPushButton:pressed { background:#3a8c3a; }"
+            "QPushButton:hover { background:#357035; }"
+        )
+        self._ptt_btn.pressed.connect(self.ptt_pressed)
+        self._ptt_btn.released.connect(self.ptt_released)
+        layout.addWidget(self._ptt_btn)
+
         # --- Pause button ---
         self._pause_btn = QPushButton("Pause Listening")
         self._pause_btn.setCheckable(True)
@@ -286,6 +300,11 @@ class AiPanel(QWidget):
         """Start or stop the recording indicator independent of text state."""
         self._recording_active = active
         self._sync_recording_indicator()
+
+    def populate_query(self, text: str) -> None:
+        """Put STT transcription into the query box for user review before sending."""
+        self._input.setText(text)
+        self._input.setFocus()
 
     def append_response(self, text: str) -> None:
         """Append an LLM response to the log."""
