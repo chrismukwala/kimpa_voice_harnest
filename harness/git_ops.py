@@ -9,9 +9,9 @@ log = logging.getLogger(__name__)
 
 
 def is_git_repo(path: str) -> bool:
-    """Return True if *path* is inside a git repository."""
+    """Return True if *path* is a git repository root."""
     try:
-        git.Repo(path, search_parent_directories=True)
+        git.Repo(path, search_parent_directories=False)
         return True
     except (git.InvalidGitRepositoryError, git.NoSuchPathError):
         return False

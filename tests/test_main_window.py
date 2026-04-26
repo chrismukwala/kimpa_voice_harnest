@@ -246,7 +246,7 @@ class TestDiffFlow:
         coordinator.edits_proposed.emit(proposal)
 
         assert win._diff_panel is not None
-        assert win._diff_panel.isVisible()
+        assert not win._diff_panel.isHidden()
 
     def test_accept_button_calls_coordinator_accept(self, qapp, coordinator):
         """Clicking accept should write the modified content."""
@@ -280,7 +280,7 @@ class TestDiffFlow:
             "modified": "new\n",
         }
         coordinator.edits_proposed.emit(proposal)
-        assert win._diff_panel.isVisible()
+        assert not win._diff_panel.isHidden()
 
         win._on_reject_edits()
         assert not win._diff_panel.isVisible()
@@ -491,8 +491,17 @@ class TestTtsNavWiring:
         with patch.object(coordinator, "set_wake_word_enabled") as mock_wake:
             win._ai_panel._wake_word_check.setChecked(True)
 
-        mock_wake.assert_called_once_with(True)
-        assert settings.wake_word_enabled() is True
+        mock_wake.assert_not_called()
+        assert settings.wake_word_enabled() is False
+
+    def test_error_signal_shows_banner_not_response_log(self, qapp, coordinator):
+        win = MainWindow(coordinator)
+
+        coordinator.error_occurred.emit("No API key configured")
+
+        assert not win._ai_panel._error_banner.isHidden()
+        assert "No API key" in win._ai_panel._error_banner.text()
+        assert "No API key" not in win._ai_panel._log.toPlainText()
 
     def test_recording_active_signal_updates_panel(self, qapp, coordinator):
         win = MainWindow(coordinator)
@@ -543,6 +552,18 @@ class TestTtsNavWiring:
         # QShortcut(ApplicationShortcut) reliably in headless tests.
         win._on_tts_right()
         assert win._tts_nav.current_index == 1
+
+    def test_keyboard_right_arrow_ignored_in_text_input(self, qapp, coordinator):
+        win = MainWindow(coordinator)
+        win.show()
+        chunks = [("A.", b"w1"), ("B.", b"w2")]
+        with patch.object(win._tts_nav, "play_current"):
+            coordinator.tts_chunks_ready.emit(chunks)
+        win._ai_panel._input.setFocus()
+
+        win._on_tts_right()
+
+        assert win._tts_nav.current_index == 0
 
     def test_keyboard_left_arrow_navigates_prev(self, qapp, coordinator):
         """Left arrow key should go back in TTS navigator."""

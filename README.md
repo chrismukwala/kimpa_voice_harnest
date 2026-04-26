@@ -11,10 +11,10 @@ A standalone desktop **voice-driven coding assistant** built with Python 3.11, P
 - **AI-powered edits** — SEARCH/REPLACE blocks parsed from LLM output, shown as diffs
 - **Accept / Reject** — review every change before it touches your code
 - **Git auto-commit** — accepted edits are committed automatically
-- **Local STT** — RealtimeSTT + faster-whisper large-v3 (runs on GPU)
-- **Local TTS** — Kokoro-82M with sentence-level navigation and speed control
+- **Local STT** — direct faster-whisper turbo + WebRTC VAD (runs on GPU)
+- **Local TTS** — Kokoro-82M with sentence-level navigation, speed control, and GPU support when available
 - **Repo map** — tree-sitter symbol index for richer LLM context
-- **Cloud LLM** — Gemini 2.5 Pro via OpenAI SDK (100k char context)
+- **Cloud LLM** — Gemini 2.5 Flash Lite via OpenAI SDK (100k char context)
 
 ## Tech Stack
 
@@ -22,15 +22,15 @@ A standalone desktop **voice-driven coding assistant** built with Python 3.11, P
 |---|---|
 | UI | PyQt6 + PyQt6-WebEngine |
 | Editor | Monaco Editor 0.52.0 (AMD build, localhost HTTP) |
-| STT | RealtimeSTT (faster-whisper large-v3 + Silero VAD) |
-| LLM | Gemini 2.5 Pro via OpenAI SDK |
-| TTS | Kokoro-82M (CPU, Apache 2.0) |
+| STT | faster-whisper turbo + WebRTC VAD |
+| LLM | Gemini 2.5 Flash Lite via OpenAI SDK |
+| TTS | Kokoro-82M (GPU when available, CPU fallback, Apache 2.0) |
 | Edit format | Aider-style SEARCH/REPLACE blocks |
 | VCS | gitpython auto-commit |
 
 ## Requirements
 
-- **Python 3.11.x** — 3.12+ breaks webrtcvad and OpenWakeWord
+- **Python 3.11.x** — required for the supported audio stack
 - **Windows 11** — primary target (Linux/macOS untested)
 - **NVIDIA GPU** with CUDA 12.1 toolkit (nvcc on PATH)
 - **espeak-ng** installed and on PATH (Kokoro dependency)
@@ -64,7 +64,7 @@ voice_harnest/
 ├── harness/                # Core modules (STT, LLM, TTS, coordinator, etc.)
 ├── ui/                     # PyQt6 UI (main window, editor, AI panel)
 ├── assets/monaco/          # Monaco Editor 0.52.0 AMD build
-├── tests/                  # 210+ tests (TDD — Red/Green/Refactor)
+├── tests/                  # 375+ tests (TDD — Red/Green/Refactor)
 ├── setup/install.py        # 6-step install wizard
 ├── tools/                  # Manual audio diagnostics
 ├── phase0_poc/             # Monaco ↔ QWebChannel POC (passed)
@@ -115,7 +115,7 @@ See [AGENTS.md](AGENTS.md) for full contributor guidelines.
 - Windows 11 only (Linux/macOS untested)
 - Requires NVIDIA GPU with CUDA 12.1
 - Python 3.11 only (3.12+ not supported)
-- Phase 4 (TTS UX) is stabilizing — audio device switching may have rough edges
+- Voice UX is stabilizing — speaking, listening, interruption, and TTS playback may still feel rough
 
 ## License
 

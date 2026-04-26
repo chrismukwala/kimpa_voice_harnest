@@ -1,5 +1,9 @@
 # Plan: Phase 4 Stabilization — Audio Recovery, Device Config, and UX Follow-Ups
 
+> Historical plan. Phase 5 replaced RealtimeSTT/OpenWakeWord with direct faster-whisper,
+> WebRTC VAD, and push-to-talk support. Use `docs/PROGRESS.md` for current phase status and
+> treat this document as background on why audio UX stabilization matters.
+
 > **Created:** 2026-04-10
 > **Status:** Implementation complete; hardware validation pending
 > **Prerequisite:** Phase A0 is complete. Phases A and B must complete before C–E.

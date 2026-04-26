@@ -1,6 +1,10 @@
 # Voice Harness — Code Review Report
 _Generated: 2026-04-11_
 
+> Historical review artifact. Several findings were later addressed or superseded by Phase 5 and
+> the 2026-04-26 documentation sync. Use `docs/PROGRESS.md` as the current source of truth for
+> phase status and current priorities.
+
 ## Executive Summary
 The codebase is structurally sound with a well-organised 230-test suite and clean constraint compliance in most areas, but **two runtime bugs have silently shipped**: the `DiffPanel` renders as a floating orphan window rather than an embedded panel, and TTS auto-advance (`play_all()`) is never called from the UI so only one sentence plays per button press. These must be fixed before Phase 4 can be declared stable.
 

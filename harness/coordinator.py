@@ -4,7 +4,7 @@ import logging
 import os
 import queue
 import threading
-from typing import Optional
+from typing import Iterator, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -21,6 +21,8 @@ log = logging.getLogger(__name__)
 
 # Timeout (seconds) for blocking queue.get so the worker checks shutdown regularly.
 _QUEUE_TIMEOUT = 1.0
+_QUEUE_MAXSIZE = 3
+_STREAM_SENTINEL = object()
 
 
 class Coordinator(QObject):
@@ -54,7 +56,7 @@ class Coordinator(QObject):
         self._tts_playback_active = False
 
         # Pipeline queue — each item is a message dict.
-        self._queue: queue.Queue = queue.Queue()
+        self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
@@ -87,7 +89,14 @@ class Coordinator(QObject):
         self._stop_event.set()
         self._tts_playback_active = False
         self._voice.stop()
-        self._queue.put(None)  # sentinel to unblock worker
+        try:
+            self._queue.put_nowait(None)  # sentinel to unblock worker
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._queue.put_nowait(None)
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=5.0)
             self._worker_thread = None
@@ -209,14 +218,17 @@ class Coordinator(QObject):
                 "context": self._current_file_content,
                 "repo_map": self._repo_map,
             }
-        self._queue.put(msg)
+        try:
+            self._queue.put_nowait(msg)
+        except queue.Full:
+            self.error_occurred.emit("Voice Harness is busy; dropped the newest request")
 
     # ------------------------------------------------------------------
     # Pipeline worker (runs in background thread)
     # ------------------------------------------------------------------
     def _pipeline_loop(self):
         # Generate initial repo map for LLM context (Phase 3b).
-        self.refresh_repo_map()
+        threading.Thread(target=self.refresh_repo_map, daemon=True).start()
 
         while not self._stop_event.is_set():
             try:
@@ -239,19 +251,8 @@ class Coordinator(QObject):
 
         Returns True on success, False on failure (emits error_occurred).
         """
-        # --- Path validation ---
-        if self._project_root:
-            try:
-                real_file = os.path.realpath(file_path)
-                real_root = os.path.realpath(self._project_root)
-                if not real_file.startswith(real_root + os.sep) and real_file != real_root:
-                    self.error_occurred.emit(
-                        f"Refusing edit outside project root: {file_path}"
-                    )
-                    return False
-            except (OSError, ValueError) as exc:
-                self.error_occurred.emit(f"Path validation failed: {exc}")
-                return False
+        if not self._validate_edit_target(file_path):
+            return False
 
         # --- Write file ---
         try:
@@ -293,6 +294,37 @@ class Coordinator(QObject):
         """Discard proposed edits — no-op."""
         log.info("Edits rejected by user")
 
+    def _validate_edit_target(self, file_path: str) -> bool:
+        try:
+            real_file = os.path.realpath(file_path)
+            if self._project_root:
+                real_root = os.path.realpath(self._project_root)
+                common_path = os.path.commonpath([real_file, real_root])
+                if os.path.normcase(common_path) != os.path.normcase(real_root):
+                    self.error_occurred.emit(
+                        f"Refusing edit outside project root: {file_path}"
+                    )
+                    return False
+                rel_path = os.path.relpath(real_file, real_root)
+                edit_applier.validate_path(rel_path, real_root)
+                return True
+
+            with self._context_lock:
+                current_file = self._current_file_path
+            if current_file is None:
+                self.error_occurred.emit("Refusing edit without project root or open file")
+                return False
+            real_current = os.path.realpath(current_file)
+            if os.path.normcase(real_file) != os.path.normcase(real_current):
+                self.error_occurred.emit(
+                    f"Refusing edit outside active file: {file_path}"
+                )
+                return False
+            return True
+        except (OSError, ValueError) as exc:
+            self.error_occurred.emit(f"Path validation failed: {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # Pipeline worker (runs in background thread)
     # ------------------------------------------------------------------
@@ -310,17 +342,54 @@ class Coordinator(QObject):
             self.state_changed.emit("listening")
             return
 
-        # --- Stream full LLM response ---
+        # --- Stream LLM response into a live TTS consumer ---
         try:
-            full_response = "".join(
-                code_llm.chat_stream_raw(
-                    query, context=context, repo_map=repo_map, api_key=api_key
-                )
+            raw_stream = code_llm.chat_stream_raw(
+                query, context=context, repo_map=repo_map, api_key=api_key
             )
         except RuntimeError as exc:
             self.error_occurred.emit(str(exc))
             self.state_changed.emit("listening")
             return
+
+        chunk_queue: queue.Queue = queue.Queue()
+        stream_done = threading.Event()
+        stream_errors: list[RuntimeError] = []
+        full_response_parts: list[str] = []
+
+        def produce_chunks() -> None:
+            try:
+                for chunk in raw_stream:
+                    full_response_parts.append(chunk)
+                    chunk_queue.put(chunk)
+            except RuntimeError as exc:
+                stream_errors.append(exc)
+            finally:
+                chunk_queue.put(_STREAM_SENTINEL)
+                stream_done.set()
+
+        def queued_chunks() -> Iterator[str]:
+            while True:
+                item = chunk_queue.get()
+                if item is _STREAM_SENTINEL:
+                    break
+                yield item
+
+        sentences = code_llm.split_sentences_streaming(queued_chunks())
+        producer_thread = threading.Thread(target=produce_chunks, daemon=True)
+        tts_thread = threading.Thread(
+            target=self._run_tts, args=(sentences,), daemon=True
+        )
+        producer_thread.start()
+        tts_thread.start()
+        stream_done.wait()
+
+        if stream_errors:
+            self.error_occurred.emit(str(stream_errors[0]))
+            self.state_changed.emit("listening")
+            return
+
+        full_response = "".join(full_response_parts)
 
         # Emit response to UI immediately — pipeline is now free.
         self.llm_response_ready.emit(full_response)
@@ -351,17 +420,9 @@ class Coordinator(QObject):
         # (Option B) Always return to listening before TTS starts.
         self.state_changed.emit("listening")
 
-        # (Option A) TTS runs in its own thread — does not block the pipeline.
-        if prose:
-            tts_thread = threading.Thread(
-                target=self._run_tts, args=(prose,), daemon=True
-            )
-            tts_thread.start()
-
-    def _run_tts(self, prose: str) -> None:
-        """Synthesise *prose* via Kokoro and emit chunks — runs in a dedicated thread."""
+    def _run_tts(self, sentences: Iterator[str]) -> None:
+        """Synthesise streaming sentences via Kokoro and emit chunks."""
         try:
-            sentences = code_llm.split_sentences_streaming(iter([prose]))
             tts_chunks: list = []
             for sentence, wav_bytes in tts_mod.speak_stream(sentences):
                 tts_chunks.append((sentence, wav_bytes))

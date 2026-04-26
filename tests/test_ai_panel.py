@@ -259,8 +259,16 @@ class TestAudioSettingsControls:
 
         panel._wake_word_check.setChecked(True)
 
-        assert len(spy) == 1
-        assert spy[0][0] is True
+        assert len(spy) == 0
+        assert not panel._wake_word_check.isEnabled()
+
+    def test_error_banner_shows_critical_error(self, qapp):
+        panel = AiPanel()
+
+        panel.show_error("No API key configured")
+
+        assert not panel._error_banner.isHidden()
+        assert "No API key" in panel._error_banner.text()
 
 
 @pytest.mark.ui

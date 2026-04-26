@@ -282,7 +282,7 @@ class EditorPanel(QWidget):
             QWebEngineSettings.WebAttribute.JavascriptEnabled, True
         )
         self._view.settings().setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False
         )
 
         # --- QWebChannel bridge ---

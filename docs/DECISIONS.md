@@ -36,13 +36,15 @@
 
 ---
 
-## ADR-004: RealtimeSTT with thin adapter pattern
+## ADR-004: Direct faster-whisper + WebRTC VAD voice input
 
-**Decision**: Use RealtimeSTT as the STT library but wrap it in a thin adapter (`voice_input.py`) with a minimal public API.
+**Decision**: Use a direct `sounddevice.InputStream` + WebRTC VAD + faster-whisper turbo pipeline inside `harness/voice_input.py`.
 
-**Rationale**: RealtimeSTT bundles VAD + faster-whisper + microphone capture in one library, reducing integration work. However, it's semi-abandoned (infrequent updates, aging dependencies). The thin adapter pattern means only `voice_input.py` imports RealtimeSTT — if it breaks or a better library appears, only that one ~80-line file needs rewriting.
+**Rationale**: Phase 5 replaced the RealtimeSTT wrapper because direct ownership gives the app more control over latency, VAD thresholds, push-to-talk, diagnostics, and interruption behavior. This is important for the current product goal: make speaking and TTS feel seamless rather than clunky.
 
-**Adapter API**: `start()`, `stop()`, `pause()`, `resume()`, `on_text(callback)` — nothing else.
+**Public API**: `start()`, `stop()`, `pause()`, `resume()`, `on_text(callback)`, device configuration, push-to-talk controls, and status/error/recording callbacks.
+
+**Status**: Wake-word support and RealtimeSTT were removed in Phase 5. Future wake-word work should be treated as a new product decision, not a live requirement.
 
 ---
 
@@ -50,7 +52,7 @@
 
 **Decision**: Use SEARCH/REPLACE blocks (the format from Aider) for LLM code edits.
 
-**Rationale**: Well-tested format that Qwen2.5-Coder understands reliably. More precise than unified diffs (LLMs often generate invalid diffs). Easier to parse with regex. Each block is self-contained — no line numbers to get wrong.
+**Rationale**: Well-tested format that coding LLMs handle reliably. More precise than unified diffs (LLMs often generate invalid diffs). Easier to parse with regex. Each block is self-contained — no line numbers to get wrong.
 
 **Parser details**: Lenient regex (6-8 chevrons, case-insensitive), strip enclosing fenced code blocks, fuzzy fallback via `difflib.SequenceMatcher` at 0.85 threshold. `EditResult.used_fuzzy` flag indicates when fuzzy matching was used, enabling UI warnings.
 
@@ -74,9 +76,9 @@
 
 ## ADR-008: int8_float16 whisper (not fp16)
 
-**Decision**: Use `compute_type="int8_float16"` for faster-whisper large-v3.
+**Decision**: Use `compute_type="int8_float16"` for faster-whisper turbo.
 
-**Rationale**: VRAM budget is 12GB total. fp16 whisper uses ~3.1GB, which when combined with a local LLM would leave little headroom. int8_float16 uses ~1.5GB — a safer choice regardless of what else shares the GPU. (Originally chosen to fit alongside Qwen2.5-Coder:14b ~9 GB; still preferred after LLM moved to cloud in ADR-011.)
+**Rationale**: VRAM budget is 12GB total. fp16 whisper would consume more headroom than needed. int8_float16 is a safer choice regardless of what else shares the GPU. This remains preferred after the LLM moved to cloud in ADR-011.
 
 **Quality impact**: Minimal — int8 quantization on Whisper has negligible WER degradation for English speech.
 
@@ -98,21 +100,19 @@
 
 **Decision**: Require Python 3.11.x — do not support 3.12+.
 
-**Rationale**: Two critical dependencies lack Python 3.12 wheels:
-- `webrtcvad` (used by RealtimeSTT for voice activity detection) — no 3.12 wheels, compile fails
-- `openwakeword` — compatibility issues with 3.12+ numpy/onnxruntime versions
+**Rationale**: The audio stack is validated on Python 3.11, and WebRTC VAD compatibility is the most fragile piece on Windows.
 
 The `webrtcvad-wheels` variant provides pre-built Windows wheels for 3.11 but not 3.12.
 
 ---
 
-## ADR-011: Gemini 2.5 Pro via OpenAI SDK (replacing Ollama)
+## ADR-011: Gemini 2.5 Flash Lite via OpenAI SDK (replacing Ollama)
 
-**Decision**: Replace local Ollama + Qwen2.5-Coder:14b with hosted Gemini 2.5 Pro, accessed via the `openai` Python SDK pointed at Google's OpenAI-compatible endpoint.
+**Decision**: Replace local Ollama + Qwen2.5-Coder:14b with hosted Gemini, currently `gemini-2.5-flash-lite`, accessed via the `openai` Python SDK pointed at Google's OpenAI-compatible endpoint.
 
 **Rationale**: Running both faster-whisper STT (~1.5 GB) and Qwen2.5-Coder:14b (~9 GB) on a 12 GB GPU left only ~1.5 GB headroom, causing VRAM pressure and slow inference. Moving the LLM to a hosted service frees ~9 GB VRAM, dramatically improves inference speed, and unlocks a much larger context window (100k chars vs 4k tokens).
 
-**Why Gemini 2.5 Pro**: Strong coding performance, generous free tier, 1M token context window. The OpenAI-compatible endpoint (`https://generativelanguage.googleapis.com/v1beta/openai/`) means the `openai` SDK works directly — no Gemini-specific SDK needed.
+**Why Gemini Flash Lite now**: Lower latency and cost are more important during voice UX stabilization than maximum reasoning depth. The OpenAI-compatible endpoint (`https://generativelanguage.googleapis.com/v1beta/openai/`) means the `openai` SDK works directly — no Gemini-specific SDK needed.
 
 **Why OpenAI SDK**: Maximum provider portability. If the user wants to switch to OpenAI, Anthropic (via proxy), or any OpenAI-compatible endpoint, only `MODEL` and `BASE_URL` constants need changing.
 

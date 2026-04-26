@@ -2,11 +2,14 @@
 
 import re
 import io
+import logging
 import threading
 from typing import Generator, Iterator, List, Tuple
 
 import numpy as np
 import soundfile as sf
+
+log = logging.getLogger(__name__)
 
 
 # Run Kokoro on GPU if available, otherwise fall back to CPU.
@@ -18,6 +21,7 @@ except ImportError:
 
 # Lazy singleton for Kokoro pipeline — avoids reloading the 82M model every call.
 _pipeline_lock = threading.Lock()
+_synthesis_lock = threading.Lock()
 _pipeline = None
 
 
@@ -51,18 +55,9 @@ def speak(text: str) -> List[Tuple[str, bytes]]:
 
     results: List[Tuple[str, bytes]] = []
     for sentence in sentences:
-        generator = pipeline(sentence, voice="af_heart")
-        audio_chunks = []
-        sample_rate = 24000
-        for _, _, audio in generator:
-            audio_chunks.append(audio)
-            # sample rate comes from the pipeline, usually 24000
-        if not audio_chunks:
-            continue
-        combined = np.concatenate(audio_chunks)
-        buf = io.BytesIO()
-        sf.write(buf, combined, sample_rate, format="WAV")
-        results.append((sentence, buf.getvalue()))
+        wav_bytes = _synthesize_sentence(pipeline, sentence)
+        if wav_bytes is not None:
+            results.append((sentence, wav_bytes))
 
     return results
 
@@ -77,17 +72,31 @@ def speak_stream(sentences: Iterator[str]) -> Generator[Tuple[str, bytes], None,
     for sentence in sentences:
         if not sentence or not sentence.strip():
             continue
-        generator = pipeline(sentence, voice="af_heart")
-        audio_chunks = []
-        sample_rate = 24000
-        for _, _, audio in generator:
-            audio_chunks.append(audio)
+        wav_bytes = _synthesize_sentence(pipeline, sentence)
+        if wav_bytes is not None:
+            yield (sentence, wav_bytes)
+
+
+def _synthesize_sentence(pipeline, sentence: str) -> bytes | None:
+    """Return WAV bytes for one sentence, or None if synthesis fails."""
+    try:
+        with _synthesis_lock:
+            generator = pipeline(sentence, voice="af_heart")
+            audio_chunks = []
+            sample_rate = 24000
+            for _, _, audio in generator:
+                audio_chunks.append(audio)
         if not audio_chunks:
-            continue
+            return None
         combined = np.concatenate(audio_chunks)
+        if combined.ndim != 1:
+            raise ValueError("Expected mono audio from Kokoro")
         buf = io.BytesIO()
         sf.write(buf, combined, sample_rate, format="WAV")
-        yield (sentence, buf.getvalue())
+        return buf.getvalue()
+    except (RuntimeError, OSError, ValueError) as exc:
+        log.warning("Skipping TTS sentence after synthesis failure: %s", exc)
+        return None
 
 
 def play_wav_bytes(wav_bytes: bytes):

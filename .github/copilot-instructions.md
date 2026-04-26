@@ -4,10 +4,10 @@ This is a standalone desktop voice-driven coding assistant built with Python 3.1
 
 ## Key constraints
 
-- Python 3.11.x only — 3.12+ breaks webrtcvad and OpenWakeWord.
+- Python 3.11.x only — this is the validated target for the audio stack.
 - PyTorch (CUDA 12.1) must be installed BEFORE any other dependency.
 - `ctranslate2` is pinned to 4.4.0 — do not upgrade.
-- Only `harness/voice_input.py` may import RealtimeSTT — thin adapter pattern.
+- Keep mic capture, WebRTC VAD, and faster-whisper details inside `harness/voice_input.py`.
 - Coordinator messages are always `{"query": str, "context": str|None, "repo_map": str|None}`.
 - `tts.speak()` must return `List[Tuple[str, bytes]]` — never a single buffer.
 - Monaco is served via localhost HTTP server — never `file://` or custom URL schemes.
@@ -24,8 +24,9 @@ This is a standalone desktop voice-driven coding assistant built with Python 3.1
 ## TDD workflow
 
 - **Red → Green → Refactor** — every feature/fix starts with a failing test.
+- For Python changes, follow `.github/instructions/python-correctness.instructions.md`.
 - Run `python -m pytest tests/ -v` before committing — all tests must pass.
-- Mock heavy dependencies (OpenAI SDK, RealtimeSTT, Kokoro, sounddevice) — tests must be fast.
+- Mock heavy dependencies (OpenAI SDK, faster-whisper, WebRTC VAD, Kokoro, sounddevice) — tests must be fast.
 - UI tests use the `qapp` fixture and `@pytest.mark.ui`.
 
 ## After changes

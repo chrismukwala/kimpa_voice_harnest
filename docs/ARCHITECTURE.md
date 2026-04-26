@@ -2,15 +2,15 @@
 
 ## System Overview
 
-Voice Harness is a PyQt6 desktop application with a queue-based pipeline coordinating voice input, LLM processing, and TTS output. The UI is a 3-panel IDE shell.
+Voice Harness is a PyQt6 desktop application with a queue-based pipeline coordinating voice input, LLM processing, edit review, and TTS output. The UI is a 3-panel IDE shell.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                         MainWindow                               │
 │  ┌──────────┐  ┌────────────────────┐  ┌───────────────────┐    │
 │  │ File Tree │  │   Editor Panel     │  │    AI Panel       │    │
-│  │ QTreeView │  │   (QPlainTextEdit  │  │  - Status label   │    │
-│  │           │  │    → Monaco in 2b) │  │  - Response log   │    │
+│  │ QTreeView │  │   Monaco Editor    │  │  - Status label   │    │
+│  │           │  │                    │  │  - Response log   │    │
 │  │           │  │                    │  │  - Manual input    │    │
 │  │           │  │                    │  │  - Pause button    │    │
 │  └──────────┘  └────────────────────┘  └───────────────────┘    │
@@ -22,7 +22,7 @@ Voice Harness is a PyQt6 desktop application with a queue-based pipeline coordin
 The `Coordinator` runs a background thread processing a queue of message dicts. This architecture was chosen to match the [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech) pattern and enable streaming in later phases.
 
 ```
-Mic → VoiceInput (RealtimeSTT)
+Mic → VoiceInput (sounddevice + WebRTC VAD + faster-whisper turbo)
         │
         ▼
    ┌─────────────────────────────────────────────────────────┐
@@ -30,12 +30,12 @@ Mic → VoiceInput (RealtimeSTT)
    │                                                          │
    │  1. STT text arrives (or manual text input)              │
    │  2. context_assembler [stub: pass-through]               │
-   │     → Builds: {"query", "context", "repo_map"}          │
-   │  3. code_llm.chat() → Gemini 2.5 Flash → full response text  │
-   │  4. response_splitter [stub: pass-through]               │
-   │     → Separates prose from SEARCH/REPLACE blocks         │
-   │  5. tts.speak(prose) → List[Tuple[str, bytes]]          │
-   │  6. Emit TTS chunks to UI playback owner                 │
+      │     → Builds: {"query", "context", "repo_map"}          │
+      │  3. code_llm.chat_stream_raw() → Gemini Flash Lite       │
+      │  4. Parse SEARCH/REPLACE edits from raw response          │
+      │  5. Split spoken prose into TTS sentences                 │
+      │  6. tts.speak_stream() → incremental WAV chunks           │
+      │  7. Emit TTS chunks to UI playback owner                  │
    └─────────────────────────────────────────────────────────┘
         │
         ▼
@@ -57,14 +57,16 @@ This format is intentionally over-specified for Phase 1 so that Phase 3 doesn't 
 ## Module Responsibilities
 
 ### `harness/voice_input.py`
-- **Only file that imports RealtimeSTT** — thin adapter pattern
+- Owns the direct mic → text pipeline: `sounddevice.InputStream`, WebRTC VAD, and
+     faster-whisper turbo
 - Public API: `start()`, `stop()`, `pause()`, `resume()`, `on_text(callback)`
-- Supports input-device reconfiguration, wake-word enable/disable, error callbacks, and
-     recording-state callbacks for coordinator wiring
-- If RealtimeSTT needs replacing, only this ~80-line file changes
+- Supports input-device reconfiguration, push-to-talk mode, error callbacks, status callbacks,
+     and recording-state callbacks for coordinator wiring
+- RealtimeSTT and wake-word support were removed in Phase 5
 
 ### `harness/audio_settings.py`
-- Shared persistence seam for input device, output device, and wake-word mode via `QSettings`
+- Shared persistence seam for input device, output device, legacy wake-word setting, and LLM API
+     key via `QSettings`
 - Keeps persistence out of `AiPanel`
 
 ### `harness/audio_devices.py`
@@ -72,25 +74,28 @@ This format is intentionally over-specified for Phase 1 so that Phase 3 doesn't 
 - Exposes default-device lookup for startup selection
 
 ### `harness/code_llm.py`
-- Gemini 2.5 Flash client via OpenAI-compatible SDK
+- Gemini 2.5 Flash Lite client via OpenAI-compatible SDK
 - `chat(query, context, repo_map, api_key) → str` — full LLM response
+- `chat_stream_raw(...)` — raw streaming deltas for edit capture and spoken-response streaming
 - `parse_search_replace(text) → list[dict]` — lenient regex parser (6-8 chevrons)
 - `extract_prose(text) → str` — strips edit blocks, returns TTS-ready prose
 - Context budget: 100,000 chars (Gemini supports 1M tokens)
 
 ### `harness/tts.py`
-- Kokoro wrapper running on CPU (82M params, fast enough)
+- Kokoro wrapper running on GPU when CUDA is available, otherwise CPU
 - `speak(text) → List[Tuple[str, bytes]]` — sentence-split WAV chunks
+- `speak_stream(sentences)` — yields sentence WAV chunks as spoken prose becomes available
 - `play_wav_bytes(wav_bytes)` — plays through default audio device
 - The list-of-tuples return type enables Phase 4 arrow-key TTS navigation
 
 ### `harness/coordinator.py`
 - QObject with Qt signals for UI updates
 - Background thread processes queue items
-- `context_assembler` and `response_splitter` are currently pass-through stubs
+- Builds message dicts with current file context and repo-map context
 - Manages voice lifecycle: start/stop/pause/resume
 - Owns semantic TTS lifecycle via `begin_tts_playback()` / `finish_tts_playback()`
-- Owns microphone reconfiguration via `set_input_device()` / `set_wake_word_enabled()`
+- Owns microphone reconfiguration via `set_input_device()`; `set_wake_word_enabled()` is a
+     compatibility no-op after Phase 5
 - Emits explicit `recording_active_changed(bool)` for listening-state UI
 - Does not play audio directly; it emits synthesized chunks for the UI playback owner
 
@@ -98,7 +103,7 @@ This format is intentionally over-specified for Phase 1 so that Phase 3 doesn't 
 - Executes sentence-level TTS playback on the UI side
 - Emits completion when playback finishes
 - Emits `playback_error(str)` so audio failures surface into the UI
-- Supports an explicit output-device override for future audio settings
+- Supports an explicit output-device override from audio settings
 - Emits heuristic word-highlighting updates during playback
 - Guards against stale completion from interrupted playback sessions
 
@@ -152,20 +157,20 @@ Monaco is served via a localhost HTTP server (daemon thread), NOT via `file://` 
 
 ```
 RTX 4080 Laptop — 12GB VRAM
-├── faster-whisper large-v3       ~1.5 GB  (int8_float16 — NOT fp16!)
+├── faster-whisper turbo          ~0.8 GB  (int8_float16 — NOT fp16!)
 ├── OS + PyQt6 + Chromium         ~1.0 GB
-└── Kokoro-82M                    0.0 GB   (CPU)
+└── Kokoro-82M                    ~0.3 GB  (GPU when available)
                                  ──────
-                         Total   ~2.5 GB   ✓ comfortable
+                Total   ~2.1 GB   ✓ comfortable
 ```
 
-**Gemini 2.5 Flash runs in the cloud — no local VRAM needed for LLM.**
+**Gemini 2.5 Flash Lite runs in the cloud — no local VRAM needed for LLM.**
 **Previously: Ollama + Qwen2.5-Coder:14b consumed ~9 GB, leaving only ~1.5 GB headroom.**
 
 ## Threading Model
 
 - **Main thread**: Qt event loop (UI)
 - **Coordinator thread**: Pipeline queue processing (daemon)
-- **VoiceInput thread**: RealtimeSTT blocking loop (daemon)
+- **VoiceInput thread**: sounddevice/WebRTC VAD/faster-whisper loop (daemon)
 - **Asset server thread**: localhost HTTP server for Monaco (daemon, Phase 2b)
 - All background → UI communication via Qt signals (thread-safe)

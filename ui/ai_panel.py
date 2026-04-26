@@ -36,6 +36,7 @@ class AiPanel(QWidget):
     output_device_changed = pyqtSignal(object)
     wake_word_toggled = pyqtSignal(bool)
     api_key_changed = pyqtSignal(str)
+    auto_submit_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,6 +48,11 @@ class AiPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
+
+        self._auto_submit_timer = QTimer(self)
+        self._auto_submit_timer.setSingleShot(True)
+        self._auto_submit_timer.setInterval(1500)
+        self._auto_submit_timer.timeout.connect(self._on_auto_submit_timeout)
 
         # --- Audio settings ---
         self._audio_settings_toggle = QToolButton()
@@ -83,7 +89,8 @@ class AiPanel(QWidget):
         audio_layout.addWidget(self._output_device_combo, 1, 1)
 
         self._wake_word_check = QCheckBox("Wake Word")
-        self._wake_word_check.toggled.connect(self.wake_word_toggled)
+        self._wake_word_check.setEnabled(False)
+        self._wake_word_check.setToolTip("Wake word support removed in Phase 5.")
         audio_layout.addWidget(self._wake_word_check, 2, 0, 1, 2)
         layout.addWidget(self._audio_settings_panel)
 
@@ -130,7 +137,24 @@ class AiPanel(QWidget):
         )
         self._api_key_save_btn.clicked.connect(self._on_api_key_save)
         llm_layout.addWidget(self._api_key_save_btn, 0, 2)
+        self._api_key_clear_btn = QPushButton("Clear")
+        self._api_key_clear_btn.setStyleSheet(
+            "QPushButton { background:#333333; color:#d4d4d4; padding:4px 12px;"
+            " border-radius:3px; border:1px solid #555555; }"
+            "QPushButton:hover { background:#444444; }"
+        )
+        self._api_key_clear_btn.clicked.connect(self._on_api_key_clear)
+        llm_layout.addWidget(self._api_key_clear_btn, 0, 3)
         layout.addWidget(self._llm_settings_panel)
+
+        self._error_banner = QLabel("")
+        self._error_banner.setWordWrap(True)
+        self._error_banner.setStyleSheet(
+            "QLabel { background:#5a1d1d; color:#ffffff; border:1px solid #c24038;"
+            " padding:6px 8px; border-radius:3px; font-family:Consolas; font-size:11px; }"
+        )
+        self._error_banner.hide()
+        layout.addWidget(self._error_banner)
 
         # --- Status indicator ---
         status_row = QHBoxLayout()
@@ -190,24 +214,28 @@ class AiPanel(QWidget):
         )
 
         self._prev_btn = QPushButton("◄")
+        self._prev_btn.setToolTip("Previous spoken sentence (Left Arrow)")
         self._prev_btn.setStyleSheet(btn_style)
         self._prev_btn.setEnabled(False)
         self._prev_btn.clicked.connect(self.tts_prev_requested)
         tts_row.addWidget(self._prev_btn)
 
         self._play_btn = QPushButton("▶")
+        self._play_btn.setToolTip("Play or resume spoken response (Space)")
         self._play_btn.setStyleSheet(btn_style)
         self._play_btn.setEnabled(False)
         self._play_btn.clicked.connect(self.tts_play_requested)
         tts_row.addWidget(self._play_btn)
 
         self._stop_btn = QPushButton("■")
+        self._stop_btn.setToolTip("Stop spoken response (Escape)")
         self._stop_btn.setStyleSheet(btn_style)
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self.tts_stop_requested)
         tts_row.addWidget(self._stop_btn)
 
         self._next_btn = QPushButton("►")
+        self._next_btn.setToolTip("Next spoken sentence (Right Arrow)")
         self._next_btn.setStyleSheet(btn_style)
         self._next_btn.setEnabled(False)
         self._next_btn.clicked.connect(self.tts_next_requested)
@@ -305,10 +333,21 @@ class AiPanel(QWidget):
         """Put STT transcription into the query box for user review before sending."""
         self._input.setText(text)
         self._input.setFocus()
+        self._auto_submit_timer.start()
 
     def append_response(self, text: str) -> None:
         """Append an LLM response to the log."""
         self._log.appendPlainText(f"\n{'─' * 40}\n{text}\n")
+
+    def show_error(self, text: str) -> None:
+        """Show a prominent error banner for critical workflow failures."""
+        self._error_banner.setText(text)
+        self._error_banner.show()
+
+    def clear_error(self) -> None:
+        """Hide the current error banner."""
+        self._error_banner.clear()
+        self._error_banner.hide()
 
     def append_transcription(self, text: str) -> None:
         """Show what the user said."""
@@ -383,6 +422,7 @@ class AiPanel(QWidget):
     # Internal
     # ------------------------------------------------------------------
     def _on_submit(self):
+        self._auto_submit_timer.stop()
         text = self._input.text().strip()
         if text:
             self._input.clear()
@@ -411,6 +451,16 @@ class AiPanel(QWidget):
         key = self._api_key_input.text().strip()
         if key:
             self.api_key_changed.emit(key)
+
+    def _on_api_key_clear(self) -> None:
+        self._api_key_input.clear()
+        self.api_key_changed.emit("")
+
+    def _on_auto_submit_timeout(self) -> None:
+        text = self._input.text().strip()
+        if text:
+            self._input.clear()
+            self.auto_submit_requested.emit(text)
 
     def _on_input_device_changed(self) -> None:
         self.input_device_changed.emit(self._input_device_combo.currentData())

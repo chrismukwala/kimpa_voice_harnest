@@ -15,10 +15,6 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Lazy imports — only resolved when the listen loop starts.
-WhisperModel = None  # type: ignore[assignment]
-webrtcvad = None  # type: ignore[assignment]
-
 # Audio constants
 SAMPLE_RATE = 16000
 FRAME_MS = 30  # WebRTC VAD requires 10, 20, or 30 ms frames
@@ -35,7 +31,13 @@ class VoiceInput:
         set_input_device(index)
     """
 
-    def __init__(self, input_device_index: Optional[int] = None):
+    def __init__(
+        self,
+        input_device_index: Optional[int] = None,
+        model_class=None,
+        vad_module=None,
+        preload_model: bool = True,
+    ):
         self._callback: Optional[Callable[[str], None]] = None
         self._error_callback: Optional[Callable[[str], None]] = None
         self._recording_state_callback: Optional[Callable[[bool], None]] = None
@@ -48,9 +50,13 @@ class VoiceInput:
 
         # Whisper model — preloaded in background thread for fast startup.
         self._model = None
+        self._model_class = model_class
+        self._model_error_message: Optional[str] = None
         self._model_ready = threading.Event()
-        self._preload_thread = threading.Thread(target=self._preload_model, daemon=True)
-        self._preload_thread.start()
+        self._preload_thread: Optional[threading.Thread] = None
+        if preload_model:
+            self._preload_thread = threading.Thread(target=self._preload_model, daemon=True)
+            self._preload_thread.start()
 
         # Audio stream (sounddevice.InputStream)
         self._stream = None
@@ -65,6 +71,11 @@ class VoiceInput:
         self._ptt_mode = False
         self._ptt_active = threading.Event()
         self._vad = None
+        self._vad_module = vad_module
+
+        # Mic recovery policy.
+        self._mic_open_retry_delay = 2.0
+        self._mic_open_max_retries = 3
 
     # ------------------------------------------------------------------
     # Public API
@@ -146,6 +157,7 @@ class VoiceInput:
         try:
             self._load_model()
         except Exception as exc:
+            self._model_error_message = f"Whisper model load failed: {exc}"
             log.error("Background model preload failed: %s", exc)
 
     def _load_model(self) -> bool:
@@ -154,31 +166,31 @@ class VoiceInput:
             self._model_ready.set()
             return True
         try:
-            global WhisperModel
-            if WhisperModel is None:
-                from faster_whisper import WhisperModel as _WM
-                WhisperModel = _WM
-            log.info("Loading whisper base.en model (int8)...")
-            self._model = WhisperModel(
+            if self._model_class is None:
+                from faster_whisper import WhisperModel
+                self._model_class = WhisperModel
+            log.info("Loading whisper base.en model (int8_float16)...")
+            self._model = self._model_class(
                 "base.en",
                 device="cuda",
-                compute_type="int8",
+                compute_type="int8_float16",
             )
             self._model_ready.set()
+            self._model_error_message = None
             log.info("Whisper base.en model loaded")
             return True
         except (RuntimeError, OSError, ImportError, ValueError) as exc:
+            self._model_error_message = f"Whisper model load failed: {exc}"
             self._model_ready.set()  # unblock waiters even on failure
-            self._emit_error(f"Whisper model load failed: {exc}")
+            self._emit_error(self._model_error_message)
             return False
 
     def _create_vad(self):
         """Create a WebRTC VAD instance with aggressiveness=3 (most aggressive)."""
-        global webrtcvad
-        if webrtcvad is None:
-            import webrtcvad as _vad
-            webrtcvad = _vad
-        self._vad = webrtcvad.Vad(3)
+        if self._vad_module is None:
+            import webrtcvad
+            self._vad_module = webrtcvad
+        self._vad = self._vad_module.Vad(3)
 
     # ------------------------------------------------------------------
     # Transcription
@@ -209,9 +221,14 @@ class VoiceInput:
         self._emit_status("loading")
         self._model_ready.wait()  # wait for background preload
         if self._model is None:
+            if self._model_error_message:
+                self._emit_error(self._model_error_message)
+            else:
+                self._emit_error("Whisper model is not available")
             self._running = False
             return
         self._create_vad()
+        mic_open_failures = 0
 
         # Pre-speech ring buffer (captures audio before VAD triggers)
         pre_buf_frames = max(1, int(self._pre_buffer_seconds / (FRAME_MS / 1000)))
@@ -236,12 +253,22 @@ class VoiceInput:
                         device=self._input_device_index,
                     )
                     self._stream.start()
+                    mic_open_failures = 0
                     self._emit_recording_state(True)
                     self._emit_status("listening")
                 except (RuntimeError, OSError, sd.PortAudioError) as exc:
-                    self._emit_error(f"Mic open failed: {exc}")
-                    self._running = False
-                    break
+                    mic_open_failures += 1
+                    self._emit_error(
+                        "Mic open failed "
+                        f"(attempt {mic_open_failures}/{self._mic_open_max_retries}): {exc}"
+                    )
+                    self._emit_recording_state(False)
+                    if mic_open_failures >= self._mic_open_max_retries:
+                        self._running = False
+                        break
+                    self._emit_status("loading")
+                    time.sleep(self._mic_open_retry_delay)
+                    continue
 
             # --- Collect speech ---
             if self._ptt_mode:

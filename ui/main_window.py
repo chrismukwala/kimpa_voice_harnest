@@ -6,7 +6,7 @@ import os
 
 from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QTreeView, QWidget, QVBoxLayout, QHBoxLayout,
-    QPlainTextEdit, QPushButton, QLabel,
+    QPlainTextEdit, QPushButton, QLabel, QLineEdit,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QFileSystemModel, QKeySequence, QShortcut
@@ -130,12 +130,18 @@ class MainWindow(QMainWindow):
         # --- AI panel (right) ---
         self._ai_panel = AiPanel()
 
+        # --- Diff panel (hidden by default, shown inline when edits arrive) ---
+        self._diff_panel = DiffPanel(self)
+        self._diff_panel.hide()
+        self._pending_proposal = None
+
         # --- Splitter ---
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._file_tree)
         splitter.addWidget(self._editor)
+        splitter.addWidget(self._diff_panel)
         splitter.addWidget(self._ai_panel)
-        splitter.setSizes([220, 700, 380])
+        splitter.setSizes([220, 640, 360, 380])
         splitter.setStyleSheet("QSplitter::handle { background:#3c3c3c; width:2px; }")
         self.setCentralWidget(splitter)
 
@@ -144,9 +150,7 @@ class MainWindow(QMainWindow):
         coordinator.recording_active_changed.connect(self._ai_panel.set_recording_active)
         coordinator.transcription_ready.connect(self._ai_panel.populate_query)
         coordinator.llm_response_ready.connect(self._ai_panel.append_response)
-        coordinator.error_occurred.connect(
-            lambda msg: self._ai_panel.append_response(f"⚠ Error: {msg}")
-        )
+        coordinator.error_occurred.connect(self._on_error_occurred)
         coordinator.edits_proposed.connect(self._on_edits_proposed)
         coordinator.edits_applied.connect(
             lambda path: self.statusBar().showMessage(
@@ -156,6 +160,7 @@ class MainWindow(QMainWindow):
 
         # --- Wire UI → coordinator ---
         self._ai_panel.text_submitted.connect(self._on_manual_query)
+        self._ai_panel.auto_submit_requested.connect(self._on_manual_query)
         self._ai_panel.pause_toggled.connect(self._on_pause_toggle)
         self._ai_panel.ptt_pressed.connect(coordinator.ptt_press)
         self._ai_panel.ptt_released.connect(coordinator.ptt_release)
@@ -166,11 +171,6 @@ class MainWindow(QMainWindow):
 
         # --- Sync editor content to coordinator on text change ---
         self._editor.content_changed.connect(self._sync_editor_context)
-
-        # --- Diff panel (created lazily, hidden by default) ---
-        self._diff_panel = DiffPanel()
-        self._diff_panel.hide()
-        self._pending_proposal = None
 
         # --- TTS Navigator (Phase 4) ---
         self._tts_nav = TtsNavigator()
@@ -189,9 +189,8 @@ class MainWindow(QMainWindow):
         self._ai_panel.tts_next_requested.connect(self._tts_nav.next)
         self._ai_panel.tts_speed_change_requested.connect(self._on_tts_speed_change)
 
-        # --- TTS keyboard shortcuts (ApplicationShortcut so they work even
-        #     when a text widget has focus) ---
-        ctx = Qt.ShortcutContext.ApplicationShortcut
+        # --- TTS keyboard shortcuts ---
+        ctx = Qt.ShortcutContext.WindowShortcut
         QShortcut(QKeySequence(Qt.Key.Key_Right), self,
                   context=ctx).activated.connect(self._on_tts_right)
         QShortcut(QKeySequence(Qt.Key.Key_Left), self,
@@ -248,9 +247,14 @@ class MainWindow(QMainWindow):
     # Manual query
     # ------------------------------------------------------------------
     def _on_manual_query(self, text: str):
+        self._ai_panel.clear_error()
         self._ai_panel.append_transcription(text)
         self._sync_editor_context()
         self._coordinator.submit_text(text)
+
+    def _on_error_occurred(self, message: str) -> None:
+        self._ai_panel.show_error(message)
+        self.statusBar().showMessage(message, 8000)
 
     # ------------------------------------------------------------------
     # Pause / resume
@@ -281,8 +285,9 @@ class MainWindow(QMainWindow):
 
     def _on_api_key_changed(self, key: str) -> None:
         self._audio_settings.set_api_key(key)
-        self._coordinator.set_api_key(key)
-        self.statusBar().showMessage("API key saved", 5000)
+        self._coordinator.set_api_key(key or None)
+        message = "API key cleared" if not key else "API key saved"
+        self.statusBar().showMessage(message, 5000)
 
     # ------------------------------------------------------------------
     # Keep coordinator's file context in sync with editor
@@ -330,7 +335,9 @@ class MainWindow(QMainWindow):
         # Guard: reject stale accept if user switched to a different file.
         current_path = self._editor.path
         if current_path and current_path != "No file open":
-            if os.path.normpath(current_path) != os.path.normpath(proposal["file_path"]):
+            current_norm = os.path.normcase(os.path.normpath(current_path))
+            proposal_norm = os.path.normcase(os.path.normpath(proposal["file_path"]))
+            if current_norm != proposal_norm:
                 self.statusBar().showMessage(
                     "Proposal rejected — active file changed since proposal", 5000
                 )
@@ -414,6 +421,8 @@ class MainWindow(QMainWindow):
         self._tts_nav.set_speed(new_speed)
 
     def _on_tts_right(self) -> None:
+        if self._text_widget_has_focus():
+            return
         if self._tts_nav.chunk_count > 0:
             was_playing = self._tts_nav.is_playing
             if was_playing:
@@ -424,6 +433,8 @@ class MainWindow(QMainWindow):
                 self._on_tts_play_requested()
 
     def _on_tts_left(self) -> None:
+        if self._text_widget_has_focus():
+            return
         if self._tts_nav.chunk_count > 0:
             was_playing = self._tts_nav.is_playing
             if was_playing:
@@ -434,6 +445,8 @@ class MainWindow(QMainWindow):
                 self._on_tts_play_requested()
 
     def _on_tts_space(self) -> None:
+        if self._text_widget_has_focus():
+            return
         if self._tts_nav.chunk_count > 0:
             if self._tts_nav.is_playing:
                 self._on_tts_stop_requested()
@@ -441,7 +454,32 @@ class MainWindow(QMainWindow):
                 self._on_tts_play_requested()
 
     def _on_tts_escape(self) -> None:
+        if self._text_widget_has_focus():
+            return
         self._on_tts_stop_requested()
+
+    def _text_widget_has_focus(self) -> bool:
+        focus = self.focusWidget()
+        if focus is None:
+            return False
+        if isinstance(focus, (QLineEdit, QPlainTextEdit)):
+            return True
+        return self._editor.isAncestorOf(focus)
+
+    def keyPressEvent(self, event) -> None:
+        """F2 acts as an in-app push-to-talk key while the main window has focus."""
+        if event.key() == Qt.Key.Key_F2 and not event.isAutoRepeat():
+            self._coordinator.ptt_press()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_F2 and not event.isAutoRepeat():
+            self._coordinator.ptt_release()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def closeEvent(self, event) -> None:
         """Shut down the editor's HTTP server on window close."""

@@ -16,11 +16,56 @@
 | Phase 2 QA | **DONE** | Post-review hardening (4-agent audit corrections) |
 | Phase 3a | **DONE** | SEARCH/REPLACE editing flow + diff view + git auto-commit |
 | Phase 3b | **DONE** | Tree-sitter repo map context enhancement |
-| Phase 4 | **STABILIZING** | Audio recovery, device config, indicator, and highlighting are implemented; hardware validation is pending |
-| LLM Migration | **DONE** | Ollama → Gemini 2.5 Pro via OpenAI SDK |
-| Phase 5 | **IMPLEMENTED** | 3-model streaming pipeline: whisper-turbo STT, Gemini Flash streaming LLM, Kokoro GPU TTS |
+| Phase 4 | **STABILIZING** | Audio recovery, device config, indicator, and highlighting are implemented; hardware validation and UX smoothing are pending |
+| LLM Migration | **DONE** | Ollama → Gemini 2.5 Flash Lite via OpenAI SDK |
+| Phase 5 | **IMPLEMENTED / NEEDS UX STABILIZATION** | 3-model pipeline: whisper-turbo STT, Gemini Flash Lite LLM, Kokoro GPU-capable TTS |
+| Current Focus | **OPEN** | Make speaking, listening, interruption, and TTS playback feel seamless instead of clunky |
 
 ## Detailed Log
+
+### Red-Team Remediation Pass — DONE (2026-04-26)
+
+Addressed the April 26 red-team report across security, resilience, performance, UX, and
+dependency hardening.
+
+Completed work:
+- Hardened edit acceptance: `_project_root=None` now allows only the active editor file, project
+  containment uses `commonpath`, and `validate_path()` is part of the production guard.
+- Hardened LLM context handling: open-file content is clearly delimited as untrusted data and
+  nested SEARCH/REPLACE markers are neutralized before request construction.
+- Protected stored Gemini API keys with a DPAPI-backed settings format on Windows, with no
+  plaintext QSettings writes.
+- Fixed STT resilience: Whisper uses the validated `int8_float16` CUDA compute type, preload
+  failures are re-emitted after UI callbacks are registered, mic-open failures retry before stop,
+  and unit tests can disable background preload.
+- Restored real streaming behavior by handing live LLM chunks to the TTS sentence splitter and
+  synthesizer while the full response is still accumulating for edit parsing.
+- Serialized Kokoro synthesis with a lock and made per-sentence TTS synthesis failures non-fatal.
+- Added queue backpressure for submitted queries and moved initial repo-map generation off the
+  pipeline worker's startup path.
+- Improved UI workflow: diff panel is inline, critical errors use a banner, dead wake-word UI is
+  disabled with a tooltip, STT preview auto-submits after a short delay, F2 provides in-window PTT,
+  arrow/space/escape TTS shortcuts are gated while text widgets have focus, stale diff path checks
+  are Windows case-insensitive, and the API key field has a clear action.
+- Tightened dependency bounds and documented the ctranslate2/onnxruntime CUDA and DLL constraints.
+- Removed remote URL access from Monaco's WebEngine view and stopped forcing
+  `KMP_DUPLICATE_LIB_OK=TRUE` at startup.
+- Adjusted `git_ops.is_git_repo()` so temp folders are not treated as repositories just because a
+  parent directory has `.git` metadata.
+
+Verification:
+- `python -m pytest tests/test_voice_input.py -v` — 43 passed.
+- `python -m pytest tests/ -v` — 414 passed, 1 skipped.
+
+### Agent Instruction Sync: Scoped Python Correctness — DONE (2026-04-26)
+
+- Added `.github/instructions/python-correctness.instructions.md` scoped to Python source and
+  tests.
+- Captured the project preference for test-first, verifiable Python changes: functional-core logic
+  where useful, explicit side-effect boundaries, dependency injection for external resources, and
+  behavior-focused pytest coverage.
+- Linked the scoped guidance from `AGENTS.md`, `.github/copilot-instructions.md`, and
+  `docs/CONVENTIONS.md` without duplicating the full rules in always-on context.
 
 ### Phase 0: Monaco POC Gate — DONE (2025-04-08)
 
@@ -39,6 +84,9 @@
 - External review: replaced `curl` subprocess with `urllib.request.urlopen`
 
 ### Phase 1: Core Voice Loop — DONE (2025-04-09)
+
+Historical note: this phase originally used RealtimeSTT and local Ollama. Later phases replaced
+those with direct faster-whisper/WebRTC VAD and hosted Gemini.
 
 Files created:
 - `main.py` — entry point with env var setup and `if __name__ == '__main__'` guard
@@ -301,13 +349,13 @@ Completed work:
   HTML rendering in `AiPanel`.
 - Wired audio settings, recording state, and word highlighting through `MainWindow`.
 - Added `tools/test_mic.py` for manual microphone diagnostics: device listing, amplitude stats,
-  and optional one-shot RealtimeSTT transcription.
+  and optional one-shot transcription.
 - Added new test coverage for `audio_devices`, `audio_settings`, `voice_input`, `coordinator`,
   `ai_panel`, `tts_navigator`, and `main_window`.
 - Full suite after the change: **317 passed, 1 skipped**.
 
 Remaining validation blocker:
-- `.venv-poc` does not include the full audio stack (`sounddevice`, RealtimeSTT). Real STT/TTS
+- `.venv-poc` does not include the full audio stack (`sounddevice`, faster-whisper, WebRTC VAD). Real STT/TTS
   hardware validation still must run in the full `.venv` on Python 3.11.x.
 
 ### Phase 4: Deferred to Future
@@ -316,7 +364,7 @@ Features planned but pushed to a future phase:
 - Code explanation vs. summarization LLM modes
 - Application icons
 
-### Phase 5: 3-Model Streaming Pipeline — IMPLEMENTED (2026-04-11)
+### Phase 5: 3-Model Streaming Pipeline — IMPLEMENTED / NEEDS UX STABILIZATION (2026-04-11)
 
 Goal: Replace RealtimeSTT wrapper with direct faster-whisper, add streaming LLM → TTS pipeline
 for reduced end-to-end latency, move Kokoro to GPU, drop wake word support.
@@ -331,7 +379,7 @@ Completed work:
   - Removed wake word support entirely
   - Same public API preserved: `start()`, `stop()`, `pause()`, `resume()`, `on_text()`, etc.
   - 32 tests across 5 classes (API, model, VAD, transcription, callback safety)
-- **`harness/code_llm.py`** — Added streaming capabilities
+- **`harness/code_llm.py`** — Added streaming capabilities for `gemini-2.5-flash-lite`
   - `chat_stream_raw()` — generator using `stream=True` for Gemini API, yields raw text deltas
   - `chat_stream()` — convenience wrapper that filters raw deltas through `split_sentences_streaming()`
   - `split_sentences_streaming()` — sentence boundary detection from streaming text deltas,
@@ -370,6 +418,19 @@ VRAM budget (estimated):
 
 Full suite after the change: **375 passed, 1 skipped**.
 
+Current assessment (2026-04-26):
+- The core technical pieces are in place, but the voice experience still needs product-level
+  smoothing. Last hands-on use felt clunky and unpleasant, especially around speaking cadence,
+  listening state, TTS timing, and playback flow.
+- Treat the next pass as audio UX stabilization rather than new feature expansion: observe the
+  real interaction loop, remove awkward waits, make interruptions predictable, and make spoken
+  feedback feel calm and continuous.
+- Documentation has been realigned around the current stack: direct faster-whisper/WebRTC VAD
+  STT, Gemini Flash Lite through the OpenAI-compatible SDK, Kokoro TTS, and no wake-word support.
+- Known follow-up before calling the product smooth: run full Python 3.11 hardware validation,
+  verify `setup/install.py` validation against the current dependency list, and audit whether the
+  intended LLM/TTS streaming path is genuinely incremental during real use.
+
 ### Phase 2 QA: Post-Review Hardening — DONE (2025-04-09)
 
 Four-agent audit (architecture, testing, UI, ops) identified 6 findings. Corrections applied:
@@ -384,12 +445,12 @@ Four-agent audit (architecture, testing, UI, ops) identified 6 findings. Correct
 
 Total suite: 108 tests passing (was 96).
 
-### LLM Migration: Ollama → Gemini 2.5 Pro — DONE (2026-04-12)
+### LLM Migration: Ollama → Gemini 2.5 Flash Lite — DONE (2026-04-12)
 
-Goal: Replace local Ollama LLM (~9 GB VRAM) with hosted Gemini 2.5 Pro via OpenAI-compatible SDK to free GPU resources for STT.
+Goal: Replace local Ollama LLM (~9 GB VRAM) with hosted Gemini via the OpenAI-compatible SDK to free GPU resources for STT.
 
 Completed work:
-- **`harness/code_llm.py`** — Full rewrite: replaced `ollama`/`httpx` with `openai` SDK. Model changed to `gemini-2.5-pro`. Base URL set to `https://generativelanguage.googleapis.com/v1beta/openai/`. `chat()` now requires `api_key` param. Context budget increased from 12,000 → 100,000 chars. Timeout reduced to 120s (hosted inference is faster than local). Error handling: `AuthenticationError` → `RuntimeError("Invalid API key")`, `APIConnectionError`/`APITimeoutError` → `RuntimeError("LLM unavailable")`.
+- **`harness/code_llm.py`** — Full rewrite: replaced `ollama`/`httpx` with `openai` SDK. Current model is `gemini-2.5-flash-lite`. Base URL set to `https://generativelanguage.googleapis.com/v1beta/openai/`. `chat()` now requires `api_key` param. Context budget increased from 12,000 → 100,000 chars. Timeout reduced to 120s (hosted inference is faster than local). Error handling: `AuthenticationError` → `RuntimeError("Invalid API key")`, `APIConnectionError`/`APITimeoutError` → `RuntimeError("LLM unavailable")`.
 - **`harness/coordinator.py`** — Added `_api_key` field + `set_api_key()` method. `_process_message()` resolves key from field or `GEMINI_API_KEY` env var. Emits `error_occurred` if no key configured.
 - **`harness/audio_settings.py`** — Added `api_key()`/`set_api_key()` with QSettings persistence under `"llm/api_key"`.
 - **`ui/ai_panel.py`** — Added LLM Settings collapsible section with password-masked API key field + Save button. Emits `api_key_changed(str)` signal.
@@ -427,12 +488,17 @@ Four-agent review identified 2 critical and 8 high/medium issues. All fixed:
 7. **MEDIUM — Silent exception handlers logged** — `_on_voice_recording_state`,
    `_on_voice_status` in `coordinator.py` and `_start_word_highlight` in `tts_navigator.py` now
    log debug messages instead of silently passing.
-8. **MEDIUM — Model name in AGENTS.md** — Updated from "Gemini 2.5 Pro" to "Gemini 2.5 Flash"
+8. **MEDIUM — Model name in AGENTS.md** — Updated from "Gemini 2.5 Pro" to "Gemini 2.5 Flash Lite"
    to match `MODEL = "gemini-2.5-flash"` in code.
 9. **LOW — Duplicate gitpython** — Removed second `gitpython>=3.1.40` entry from
    `requirements.txt`.
 10. **LOW — Phase 5 date** — Fixed from 2026-04-12 to 2026-04-11.
 
-## Blockers
+## Current Blockers / Risks
 
-- **Python 3.11 not installed** — only Python 3.12.10 available on system. Must download from https://www.python.org/downloads/release/python-31111/ before Phase 1 can actually run.
+- **Real audio validation pending** — the full Python 3.11 audio environment must be used for
+  end-to-end STT/TTS testing; `.venv-poc` is only suitable for Monaco/PyQt proof-of-concept work.
+- **Audio UX still rough** — speaking/listening/TTS timing needs a dedicated stabilization pass
+  before the app feels like a seamless voice-first coding tool.
+- **Installer validation may be stale** — `setup/install.py` should be checked against the current
+  dependency set after the RealtimeSTT/OpenWakeWord removal.

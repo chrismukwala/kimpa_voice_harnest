@@ -2,7 +2,7 @@
 
 from PyQt6.QtCore import QSettings
 
-from harness.audio_settings import AudioSettingsStore
+from harness.audio_settings import AudioSettingsStore, _API_KEY_KEY
 
 
 def _make_settings(tmp_path):
@@ -56,6 +56,15 @@ class TestAudioSettingsStore:
 
         reloaded = AudioSettingsStore(settings)
         assert reloaded.api_key() == "my-secret-key"
+
+    def test_api_key_is_not_stored_plaintext(self, tmp_path):
+        settings = _make_settings(tmp_path)
+        store = AudioSettingsStore(settings)
+
+        store.set_api_key("my-secret-key")
+
+        raw_value = settings.value(_API_KEY_KEY, None)
+        assert raw_value != "my-secret-key"
 
     def test_api_key_can_be_cleared(self, tmp_path):
         settings = _make_settings(tmp_path)

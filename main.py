@@ -4,7 +4,6 @@ import os
 import sys
 
 # Env vars that must be set before any Qt / torch imports.
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--in-process-gpu"
 os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
 # OLLAMA_HOST removed — now using hosted Gemini via OpenAI SDK.

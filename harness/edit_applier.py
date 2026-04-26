@@ -58,8 +58,9 @@ def _fuzzy_find_and_replace(content: str, search: str, replace: str) -> str | No
     best_ratio = 0.0
     best_start = -1
     search_text = "".join(search_lines)
+    candidate_starts = _candidate_fuzzy_starts(content_lines, search_lines)
 
-    for i in range(len(content_lines) - n + 1):
+    for i in candidate_starts:
         candidate_text = "".join(content_lines[i:i + n])
         ratio = difflib.SequenceMatcher(
             None, search_text, candidate_text
@@ -74,6 +75,30 @@ def _fuzzy_find_and_replace(content: str, search: str, replace: str) -> str | No
         return "".join(new_lines)
 
     return None
+
+
+def _candidate_fuzzy_starts(content_lines: list[str], search_lines: list[str]) -> list[int]:
+    """Return plausible fuzzy-match windows using first/last-line hints."""
+    n = len(search_lines)
+    max_start = len(content_lines) - n
+    if max_start < 0:
+        return []
+
+    first_hint = search_lines[0].strip()
+    last_hint = search_lines[-1].strip()
+    candidates = []
+
+    for i in range(max_start + 1):
+        first_line = content_lines[i].strip()
+        last_line = content_lines[i + n - 1].strip()
+        if first_hint and first_hint == first_line:
+            candidates.append(i)
+        elif last_hint and last_hint == last_line:
+            candidates.append(i)
+
+    if candidates:
+        return candidates
+    return list(range(max_start + 1))
 
 
 def apply_edits(content: str, edits: list[dict]) -> EditResult:

@@ -165,6 +165,43 @@ class TestSpeakStream:
         assert len(results) == 1
         assert results[0][0] == "Hello."
 
+    @patch("harness.tts._pipeline", None)
+    @patch("harness.tts.KPipeline", create=True)
+    def test_speak_stream_continues_after_bad_sentence(self, _mock_kpipeline_cls):
+        mock_pipeline = MagicMock()
+        _mock_kpipeline_cls.return_value = mock_pipeline
+
+        good_audio = np.zeros(2400, dtype=np.float32)
+        bad_audio = np.zeros((2, 2), dtype=np.float32)
+        mock_pipeline.side_effect = [
+            iter([(0, 0, bad_audio)]),
+            iter([(0, 0, good_audio)]),
+        ]
+
+        with patch.dict("sys.modules", {"kokoro": MagicMock(KPipeline=_mock_kpipeline_cls)}):
+            from harness.tts import speak_stream
+            results = list(speak_stream(iter(["Bad.", "Good."])))
+
+        assert len(results) == 1
+        assert results[0][0] == "Good."
+
+    @patch("harness.tts._pipeline", None)
+    @patch("harness.tts.KPipeline", create=True)
+    def test_speak_stream_serializes_pipeline_calls(self, _mock_kpipeline_cls):
+        mock_pipeline = MagicMock()
+        _mock_kpipeline_cls.return_value = mock_pipeline
+        fake_audio = np.zeros(2400, dtype=np.float32)
+        mock_pipeline.side_effect = lambda text, voice: iter([(0, 0, fake_audio)])
+
+        with patch.dict("sys.modules", {"kokoro": MagicMock(KPipeline=_mock_kpipeline_cls)}):
+            from harness import tts
+            with patch.object(tts, "_synthesis_lock") as mock_lock:
+                mock_lock.__enter__.return_value = None
+                mock_lock.__exit__.return_value = None
+                list(tts.speak_stream(iter(["One.", "Two."])))
+
+        assert mock_lock.__enter__.call_count == 2
+
 
 # =====================================================================
 # GPU device configuration (Phase 5)

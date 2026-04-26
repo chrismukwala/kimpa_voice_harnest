@@ -90,6 +90,17 @@ class TestSubmitText:
         msg = coordinator._queue.get_nowait()
         assert msg["query"] == "manual query"
 
+    def test_submit_text_drops_when_queue_full(self, coordinator):
+        coordinator._queue = queue.Queue(maxsize=1)
+        errors = []
+        coordinator.error_occurred.connect(lambda message: errors.append(message))
+
+        coordinator.submit_text("first")
+        coordinator.submit_text("second")
+
+        assert coordinator._queue.qsize() == 1
+        assert any("busy" in error.lower() for error in errors)
+
     def test_stt_text_does_not_enqueue(self, coordinator):
         """STT text goes to the preview box — the user confirms with Send."""
         coordinator._on_stt_text("hello world test")
@@ -467,6 +478,7 @@ class TestAcceptEdits:
     def test_accept_edits_writes_file(self, mock_git, coordinator, tmp_path):
         test_file = tmp_path / "test.py"
         test_file.write_text("old content\n", encoding="utf-8")
+        coordinator.set_file_context(str(test_file), "old content\n")
         mock_git.auto_commit.return_value = True
 
         result = coordinator.accept_edits(str(test_file), "new content\n")
@@ -475,9 +487,26 @@ class TestAcceptEdits:
         assert test_file.read_text(encoding="utf-8") == "new content\n"
 
     @patch("harness.coordinator.git_ops")
+    def test_accept_without_project_root_allows_only_current_file(
+        self, mock_git, coordinator, tmp_path
+    ):
+        current_file = tmp_path / "current.py"
+        other_file = tmp_path / "other.py"
+        current_file.write_text("old\n", encoding="utf-8")
+        other_file.write_text("other\n", encoding="utf-8")
+        coordinator._project_root = None
+        coordinator.set_file_context(str(current_file), "old\n")
+        mock_git.auto_commit.return_value = True
+
+        assert coordinator.accept_edits(str(current_file), "new\n") is True
+        assert coordinator.accept_edits(str(other_file), "evil\n") is False
+        assert other_file.read_text(encoding="utf-8") == "other\n"
+
+    @patch("harness.coordinator.git_ops")
     def test_accept_edits_calls_git_auto_commit(self, mock_git, coordinator, tmp_path):
         test_file = tmp_path / "test.py"
         test_file.write_text("old\n", encoding="utf-8")
+        coordinator.set_file_context(str(test_file), "old\n")
         mock_git.auto_commit.return_value = True
 
         coordinator.accept_edits(str(test_file), "new\n")
@@ -488,6 +517,7 @@ class TestAcceptEdits:
     def test_accept_edits_emits_edits_applied(self, mock_git, coordinator, tmp_path):
         test_file = tmp_path / "test.py"
         test_file.write_text("old\n", encoding="utf-8")
+        coordinator.set_file_context(str(test_file), "old\n")
         mock_git.auto_commit.return_value = True
 
         received = []
@@ -513,6 +543,7 @@ class TestAcceptEdits:
         """Accept should return False and emit error for unwritable paths."""
         errors = []
         coordinator.error_occurred.connect(lambda msg: errors.append(msg))
+        coordinator.set_file_context("/nonexistent/dir/file.py", "content")
 
         result = coordinator.accept_edits("/nonexistent/dir/file.py", "content")
 
@@ -525,6 +556,7 @@ class TestAcceptEdits:
         """If git commit fails, file is still written but error emitted."""
         test_file = tmp_path / "test.py"
         test_file.write_text("old\n", encoding="utf-8")
+        coordinator.set_file_context(str(test_file), "old\n")
         mock_git.auto_commit.return_value = False
 
         errors = []
@@ -556,6 +588,19 @@ class TestAcceptEdits:
         assert "outside project root" in errors[0]
 
     @patch("harness.coordinator.git_ops")
+    def test_accept_rejects_project_root_sibling_prefix(self, mock_git, coordinator, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "project-other.py"
+        outside.write_text("hack\n", encoding="utf-8")
+        coordinator._project_root = str(project)
+
+        result = coordinator.accept_edits(str(outside), "evil\n")
+
+        assert result is False
+        assert outside.read_text(encoding="utf-8") == "hack\n"
+
+    @patch("harness.coordinator.git_ops")
     @patch("harness.coordinator._git")
     def test_accept_uses_repo_relative_path_for_git(self, mock_git_mod, mock_git, coordinator, tmp_path):
         """Git should receive a repo-relative path, not just basename."""
@@ -565,6 +610,7 @@ class TestAcceptEdits:
         sub.mkdir()
         test_file = sub / "code_llm.py"
         test_file.write_text("old\n", encoding="utf-8")
+        coordinator._project_root = str(project)
         mock_git.auto_commit.return_value = True
 
         # Simulate _git.Repo finding the project root.
@@ -856,3 +902,33 @@ class TestStreamingPipeline:
         coordinator._process_message(msg)
 
         assert len(received) == 0
+
+    @patch("harness.coordinator.tts_mod")
+    @patch("harness.coordinator.code_llm")
+    def test_tts_receives_live_sentence_iterator(self, mock_llm, mock_tts, coordinator):
+        mock_llm.chat_stream_raw.return_value = iter(["First. ", "Second."])
+        mock_llm.extract_prose.return_value = "First. Second."
+        mock_llm.parse_search_replace.return_value = []
+        consumed_before_speak = []
+
+        def fake_splitter(chunks):
+            for chunk in chunks:
+                consumed_before_speak.append(chunk)
+                yield chunk.strip()
+
+        def fake_speak(sentences):
+            first = next(sentences)
+            assert first == "First."
+            assert consumed_before_speak == ["First. "]
+            yield (first, b"wav")
+            for sentence in sentences:
+                yield (sentence, b"wav")
+
+        mock_llm.split_sentences_streaming.side_effect = fake_splitter
+        mock_tts.speak_stream.side_effect = fake_speak
+
+        coordinator._api_key = "test-key"
+        msg = {"query": "hi", "context": None, "repo_map": None}
+        coordinator._process_message(msg)
+
+        assert consumed_before_speak[0] == "First. "

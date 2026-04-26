@@ -13,24 +13,24 @@ PyQt6-WebEngine>=6.6.0,<6.8.0   # Separate package — easy to miss; included fr
 # --- STT / VAD / Audio ---
 # torch and torchaudio are installed FIRST by setup/install.py via CUDA index URL
 # Do NOT let pip resolve them here or you get CPU-only builds.
-faster-whisper>=1.1.0            # Phase 5: direct faster-whisper (replaces RealtimeSTT wrapper)
-ctranslate2==4.4.0               # Pin: >=4.5.0 needs cuDNN 9.2 which conflicts on RTX 4080 setup
-onnxruntime>=1.18.0,<1.19.0      # Pin: >=1.19 DLL conflicts with QtWebEngine on Windows
-webrtcvad-wheels>=2.0.14         # Use -wheels variant: has prebuilt Windows wheels for Python 3.11
+faster-whisper>=1.1.0,<2.0.0     # Phase 5: direct faster-whisper (replaces RealtimeSTT wrapper)
+ctranslate2==4.4.0               # Hard pin: >=4.5.0 needs cuDNN 9.2; validated stack uses CUDA 12.1/cuDNN 8
+onnxruntime>=1.18.0,<1.19.0      # Narrow pin: >=1.19 DLL conflicts with QtWebEngine on Windows; re-evaluate periodically
+webrtcvad-wheels>=2.0.14,<3.0.0  # Use -wheels variant: has prebuilt Windows wheels for Python 3.11
 soundfile>=0.12.0
 sounddevice>=0.4.6               # Audio playback for TTS (used by harness/tts.py)
 
 # --- LLM ---
-openai>=1.30.0                   # OpenAI-compatible SDK (used with Gemini endpoint)
+openai>=1.30.0,<2.0.0            # OpenAI-compatible SDK (used with Gemini endpoint)
 
 # --- TTS ---
-kokoro>=0.9.0                    # hexgrad/kokoro — Apache 2.0; requires espeak-ng system binary on Windows
+kokoro>=0.9.0,<1.0.0             # hexgrad/kokoro — Apache 2.0; requires espeak-ng system binary on Windows
 
 # --- Git ---
 gitpython>=3.1.40                # Auto-commit accepted edits (Phase 3a)
 
 # --- Code intelligence (Phase 3b) ---
-tree-sitter-languages>=1.10.0   # Bundles tree-sitter + pre-compiled language grammars
+tree-sitter-languages>=1.10.0,<2.0.0  # Bundles tree-sitter + pre-compiled language grammars
 
 # --- Testing ---
 pytest>=7.0.0
