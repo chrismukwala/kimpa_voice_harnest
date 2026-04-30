@@ -33,9 +33,14 @@ def auto_commit(
     try:
         repo = git.Repo(repo_path, search_parent_directories=True)
         repo.index.add([file_path])
-        repo.index.commit(message)
+        # Use git CLI (not repo.index.commit) so pre-commit hooks with /bin/sh
+        # shebangs are executed via Git for Windows' bundled sh.exe. GitPython's
+        # index.commit() invokes hooks directly via CreateProcess, which fails
+        # on Windows for shell-script hooks.
+        repo.git.commit("-m", message)
         log.info("Auto-committed %s: %s", file_path, message)
         return True
-    except (git.InvalidGitRepositoryError, git.NoSuchPathError, git.GitCommandError) as exc:
+    except (git.InvalidGitRepositoryError, git.NoSuchPathError, git.GitCommandError,
+            git.HookExecutionError) as exc:
         log.warning("Git auto-commit failed for %s: %s", file_path, exc)
         return False

@@ -15,6 +15,8 @@ from harness import code_llm
 from harness import tts as tts_mod
 from harness import edit_applier
 from harness import git_ops
+from harness import llm_tools
+from harness import model_manager
 from harness import repo_map as repo_map_mod
 
 log = logging.getLogger(__name__)
@@ -42,8 +44,13 @@ class Coordinator(QObject):
     tts_chunk_ready = pyqtSignal(str, object)  # Phase 5: incremental (sentence, wav_bytes)
     error_occurred = pyqtSignal(str)
     recording_active_changed = pyqtSignal(bool)
+    audio_level_changed = pyqtSignal(float)  # mic RMS level 0.0-1.0 while recording
     edits_proposed = pyqtSignal(dict)       # {file_path, edits, original, modified}
     edits_applied = pyqtSignal(str)         # file_path after accept
+    model_status_changed = pyqtSignal(dict)  # {whisper, kokoro, api_key}
+    model_progress = pyqtSignal(str, int, int)  # label, current, total
+    model_progress_done = pyqtSignal()
+    repo_map_status_changed = pyqtSignal(dict)  # {available, chars, files}
 
     def __init__(self, project_root: Optional[str] = None):
         super().__init__()
@@ -53,6 +60,7 @@ class Coordinator(QObject):
         self._voice.on_error(self._on_voice_error)
         self._voice.on_recording_state(self._on_voice_recording_state)
         self._voice.on_status(self._on_voice_status)
+        self._voice.on_audio_level(self._on_voice_audio_level)
         self._tts_playback_active = False
 
         # Pipeline queue — each item is a message dict.
@@ -132,6 +140,51 @@ class Coordinator(QObject):
     def set_api_key(self, key: Optional[str]) -> None:
         """Set the API key for the hosted LLM."""
         self._api_key = key
+        self.refresh_model_status()
+
+    # ------------------------------------------------------------------
+    # Model presence / download
+    # ------------------------------------------------------------------
+    def refresh_model_status(self) -> None:
+        """Emit the current STT/TTS/API-key presence flags to the UI."""
+        try:
+            summary = model_manager.status(api_key=self._api_key)
+        except (OSError, RuntimeError, ValueError) as exc:
+            log.warning("model_manager.status failed: %s", exc)
+            summary = {"whisper": False, "kokoro": False, "api_key": bool(self._api_key)}
+        self.model_status_changed.emit(summary)
+
+    def download_missing_models(self) -> None:
+        """Spawn a background thread that downloads any missing STT/TTS models."""
+        thread = threading.Thread(target=self._download_models_worker, daemon=True)
+        thread.start()
+
+    def _download_models_worker(self) -> None:
+        try:
+            if not model_manager.whisper_present():
+                self.model_progress.emit("Downloading STT model", 0, 0)
+
+                def whisper_cb(stage, current, total):
+                    self.model_progress.emit(f"STT: {stage}", current, total or 0)
+
+                try:
+                    model_manager.download_whisper(progress_cb=whisper_cb)
+                except RuntimeError as exc:
+                    self.error_occurred.emit(f"STT download failed: {exc}")
+
+            if not model_manager.kokoro_present():
+                self.model_progress.emit("Downloading TTS model", 0, 0)
+
+                def kokoro_cb(stage, current, total):
+                    self.model_progress.emit(f"TTS: {stage}", current, total or 0)
+
+                try:
+                    model_manager.download_kokoro(progress_cb=kokoro_cb)
+                except RuntimeError as exc:
+                    self.error_occurred.emit(f"TTS download failed: {exc}")
+        finally:
+            self.model_progress_done.emit()
+            self.refresh_model_status()
 
     def begin_tts_playback(self) -> None:
         """Mark TTS playback as active and emit the speaking transition once."""
@@ -161,14 +214,25 @@ class Coordinator(QObject):
     def refresh_repo_map(self):
         """Regenerate the repo map from project root."""
         if not self._project_root:
+            self.repo_map_status_changed.emit(
+                {"available": False, "chars": 0, "files": 0}
+            )
             return
         try:
             map_text = repo_map_mod.generate_repo_map(self._project_root)
             with self._context_lock:
                 self._repo_map = map_text if map_text else None
-            log.info("Repo map generated: %d chars", len(map_text))
+            chars = len(map_text) if map_text else 0
+            files = map_text.count("\n\n") + 1 if map_text else 0
+            log.info("Repo map generated: %d chars", chars)
+            self.repo_map_status_changed.emit(
+                {"available": bool(map_text), "chars": chars, "files": files}
+            )
         except (OSError, ValueError, RuntimeError) as exc:
             log.warning("Failed to generate repo map: %s", exc)
+            self.repo_map_status_changed.emit(
+                {"available": False, "chars": 0, "files": 0}
+            )
 
     def clear_file_context(self):
         with self._context_lock:
@@ -210,6 +274,12 @@ class Coordinator(QObject):
             self.state_changed.emit(status)
         except RuntimeError:
             log.debug("Coordinator deleted; swallowing status: %s", status)
+
+    def _on_voice_audio_level(self, level: float) -> None:
+        try:
+            self.audio_level_changed.emit(float(level))
+        except RuntimeError:
+            log.debug("Coordinator deleted; swallowing audio_level")
 
     def _enqueue(self, query: str):
         with self._context_lock:
@@ -256,6 +326,9 @@ class Coordinator(QObject):
 
         # --- Write file ---
         try:
+            parent = os.path.dirname(file_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(modified_content)
         except OSError as exc:
@@ -272,6 +345,7 @@ class Coordinator(QObject):
             _git.exc.InvalidGitRepositoryError,
             _git.exc.NoSuchPathError,
             OSError,
+            ValueError,
         ) as exc:
             log.debug("Git repo lookup failed, using dirname: %s", exc)
             repo_root = os.path.dirname(file_path)
@@ -342,6 +416,11 @@ class Coordinator(QObject):
             self.state_changed.emit("listening")
             return
 
+        # Tool-calling path (non-streaming) when a project root is available.
+        if self._project_root:
+            self._process_with_tools(query, context, repo_map, api_key)
+            return
+
         # --- Stream LLM response into a live TTS consumer ---
         try:
             raw_stream = code_llm.chat_stream_raw(
@@ -400,24 +479,193 @@ class Coordinator(QObject):
         self.prose_ready.emit(prose)
 
         # --- Propose edits if any SEARCH/REPLACE blocks found ---
-        if edits and context is not None:
-            with self._context_lock:
-                file_path = self._current_file_path
-
-            result = edit_applier.apply_edits(context, edits)
-            if result.success and file_path:
-                self.edits_proposed.emit({
-                    "file_path": file_path,
-                    "edits": edits,
-                    "original": context,
-                    "modified": result.content,
-                    "used_fuzzy": result.used_fuzzy,
-                })
-            elif not result.success:
-                for err in result.errors:
-                    self.error_occurred.emit(f"Edit failed: {err}")
+        self._handle_edits(edits, context)
 
         # (Option B) Always return to listening before TTS starts.
+        self.state_changed.emit("listening")
+
+    def _handle_edits(self, edits: list[dict], context: Optional[str]) -> None:
+        """Route edits to either modify-existing or create-file proposals."""
+        if not edits:
+            return
+
+        # Group: any block flagged create=True is treated as a new-file proposal.
+        for edit in edits:
+            if edit.get("create"):
+                self._propose_create(edit)
+                continue
+
+        modify_edits = [e for e in edits if not e.get("create")]
+        if not modify_edits:
+            return
+
+        with self._context_lock:
+            file_path = self._current_file_path
+            current_context = context if context is not None else self._current_file_content
+
+        if current_context is None or file_path is None:
+            self.error_occurred.emit("Refusing to modify: no open file context")
+            return
+
+        result = edit_applier.apply_edits(current_context, modify_edits)
+        if result.success:
+            self.edits_proposed.emit({
+                "file_path": file_path,
+                "edits": modify_edits,
+                "original": current_context,
+                "modified": result.content,
+                "used_fuzzy": result.used_fuzzy,
+                "create": False,
+            })
+        else:
+            for err in result.errors:
+                self.error_occurred.emit(f"Edit failed: {err}")
+
+    def _propose_create(self, edit: dict) -> None:
+        """Validate path and emit edits_proposed for a new-file creation."""
+        path = edit.get("path")
+        if not path:
+            self.error_occurred.emit(
+                "LLM requested file creation without a path header — ignoring"
+            )
+            return
+        if not self._project_root:
+            self.error_occurred.emit("Refusing file creation: no project root set")
+            return
+        try:
+            edit_applier.validate_path(path, self._project_root)
+        except ValueError as exc:
+            self.error_occurred.emit(f"Refusing file creation: {exc}")
+            return
+
+        full_path = os.path.join(self._project_root, path)
+        real_path = os.path.realpath(full_path)
+        real_root = os.path.realpath(self._project_root)
+        try:
+            common = os.path.commonpath([real_path, real_root])
+        except ValueError:
+            self.error_occurred.emit(f"Refusing file creation outside project: {path}")
+            return
+        if os.path.normcase(common) != os.path.normcase(real_root):
+            self.error_occurred.emit(f"Refusing file creation outside project: {path}")
+            return
+        if os.path.exists(real_path):
+            self.error_occurred.emit(
+                f"Refusing to create — file already exists: {path}"
+            )
+            return
+
+        self.edits_proposed.emit({
+            "file_path": real_path,
+            "edits": [edit],
+            "original": "",
+            "modified": edit.get("replace", ""),
+            "used_fuzzy": False,
+            "create": True,
+        })
+
+    # ------------------------------------------------------------------
+    # Tool-calling path
+    # ------------------------------------------------------------------
+    def _humanize_tool_call(self, name: str, args: dict) -> str:
+        """Translate a tool call into a short spoken progress message."""
+        if name == "read_file":
+            return f"Reading {args.get('path', 'file')}."
+        if name == "list_dir":
+            return f"Listing {args.get('path', 'directory')}."
+        if name == "search_text":
+            return f"Searching for {args.get('pattern', '')[:30]}."
+        if name == "create_file":
+            return f"Proposing new file {args.get('path', '')}."
+        if name == "delete_file":
+            return f"Proposing deletion of {args.get('path', '')}."
+        if name == "run_tests":
+            return "Running tests."
+        return f"Calling {name}."
+
+    def _make_tool_dispatcher(self):
+        """Build a dispatcher closure that intercepts create/delete for the UI."""
+        project_root = self._project_root
+
+        def dispatcher(name: str, args: dict) -> str:
+            result = llm_tools.dispatch(name, args, project_root=project_root)
+            # Surface destructive proposals to the UI immediately.
+            try:
+                if name == "create_file":
+                    self._propose_create({
+                        "search": "",
+                        "replace": args.get("content", ""),
+                        "path": args.get("path"),
+                        "create": True,
+                    })
+                elif name == "delete_file":
+                    self.error_occurred.emit(
+                        f"LLM proposed deleting {args.get('path')} — "
+                        "deletion confirmation UI not yet wired"
+                    )
+            except (RuntimeError, OSError, ValueError) as exc:
+                log.warning("Side-channel emit failed: %s", exc)
+            return result
+
+        return dispatcher
+
+    def _process_with_tools(
+        self,
+        query: str,
+        context: Optional[str],
+        repo_map: Optional[str],
+        api_key: str,
+    ) -> None:
+        """Run a tool-calling LLM round-trip with streaming progress speech."""
+        dispatcher = self._make_tool_dispatcher()
+        progress_sentences: queue.Queue = queue.Queue()
+        progress_done = threading.Event()
+
+        def progress_cb(name, args):
+            sentence = self._humanize_tool_call(name, args)
+            self.prose_ready.emit(sentence)
+            progress_sentences.put(sentence)
+
+        # Pump progress sentences into TTS as they arrive.
+        def progress_iter():
+            while True:
+                item = progress_sentences.get()
+                if item is _STREAM_SENTINEL:
+                    break
+                yield item
+
+        progress_tts_thread = threading.Thread(
+            target=self._run_tts, args=(progress_iter(),), daemon=True
+        )
+        progress_tts_thread.start()
+
+        try:
+            full_response = code_llm.chat_with_tools(
+                query,
+                context=context,
+                repo_map=repo_map,
+                api_key=api_key,
+                tool_dispatcher=dispatcher,
+                progress_cb=progress_cb,
+            )
+        except RuntimeError as exc:
+            self.error_occurred.emit(str(exc))
+            self.state_changed.emit("listening")
+            progress_sentences.put(_STREAM_SENTINEL)
+            return
+        finally:
+            progress_done.set()
+
+        # Emit final answer to UI.
+        self.llm_response_ready.emit(full_response)
+        prose = code_llm.extract_prose(full_response)
+        edits = code_llm.parse_search_replace(full_response)
+        if prose:
+            self.prose_ready.emit(prose)
+            progress_sentences.put(prose)
+        progress_sentences.put(_STREAM_SENTINEL)
+
+        self._handle_edits(edits, context)
         self.state_changed.emit("listening")
 
     def _run_tts(self, sentences: Iterator[str]) -> None:

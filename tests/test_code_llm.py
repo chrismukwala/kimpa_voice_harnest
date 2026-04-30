@@ -615,3 +615,41 @@ class TestChatStreamRaw:
 
         with pytest.raises(RuntimeError, match="LLM unavailable"):
             list(chat_stream_raw("test", api_key="test-key"))
+
+
+class TestSearchReplaceFileCreation:
+    def test_parse_with_path_header_captures_path(self):
+        from harness.code_llm import parse_search_replace
+        text = '''path/to/new.py
+<<<<<<< SEARCH
+=======
+print("hi")
+>>>>>>> REPLACE'''
+        blocks = parse_search_replace(text)
+        assert len(blocks) == 1
+        assert blocks[0]['path'] == 'path/to/new.py'
+        assert blocks[0]['search'] == ''
+        assert blocks[0]['replace'].strip() == 'print(\"hi\")'
+
+    def test_parse_empty_search_marks_create_intent(self):
+        from harness.code_llm import parse_search_replace
+        text = '''new.py
+<<<<<<< SEARCH
+=======
+print("hi")
+>>>>>>> REPLACE'''
+        blocks = parse_search_replace(text)
+        assert blocks[0]['create'] is True
+
+    def test_parse_existing_block_without_path_keeps_old_shape(self):
+        from harness.code_llm import parse_search_replace
+        text = '''<<<<<<< SEARCH
+old
+=======
+new
+>>>>>>> REPLACE'''
+        blocks = parse_search_replace(text)
+        assert blocks[0]['search'] == 'old'
+        assert blocks[0]['replace'] == 'new'
+        assert blocks[0].get('create') is False
+        assert blocks[0].get('path') is None

@@ -381,3 +381,61 @@ class TestCallbackSafety:
         vi._emit_recording_state(True)
         vi._emit_recording_state(False)
         assert states == [True, False]
+
+
+class TestAudioLevel:
+    """Verify mic RMS audio level is emitted while recording."""
+
+    def test_on_audio_level_registers_callback(self):
+        vi = VoiceInput(preload_model=False)
+        cb = lambda lvl: None
+        vi.on_audio_level(cb)
+        assert vi._audio_level_callback is cb
+
+    def test_emit_audio_level_silent_frame_is_zero(self):
+        vi = VoiceInput(preload_model=False)
+        levels = []
+        vi.on_audio_level(lambda lvl: levels.append(lvl))
+        silent = np.zeros(480, dtype=np.int16).tobytes()
+        vi._emit_audio_level(silent)
+        assert levels == [0.0]
+
+    def test_emit_audio_level_loud_frame_is_positive(self):
+        vi = VoiceInput(preload_model=False)
+        levels = []
+        vi.on_audio_level(lambda lvl: levels.append(lvl))
+        loud = (np.ones(480, dtype=np.int16) * 16000).tobytes()
+        vi._emit_audio_level(loud)
+        assert levels and levels[0] > 0.5
+
+    def test_emit_audio_level_clamped_to_one(self):
+        vi = VoiceInput(preload_model=False)
+        levels = []
+        vi.on_audio_level(lambda lvl: levels.append(lvl))
+        max_loud = (np.ones(480, dtype=np.int16) * 32000).tobytes()
+        vi._emit_audio_level(max_loud)
+        assert levels and levels[0] <= 1.0
+
+    def test_emit_audio_level_safe_without_callback(self):
+        vi = VoiceInput(preload_model=False)
+        vi._emit_audio_level(np.zeros(480, dtype=np.int16).tobytes())  # must not raise
+
+
+class TestPttMinWordsBypass:
+    """PTT is an explicit user action — short commands must not be filtered out."""
+
+    def test_short_text_passes_in_ptt_mode(self):
+        vi = VoiceInput(preload_model=False)
+        vi.set_ptt_mode(True)
+        received = []
+        vi.on_text(lambda t: received.append(t))
+        vi._emit_text("save file")
+        assert received == ["save file"]
+
+    def test_short_text_still_filtered_in_vad_mode(self):
+        vi = VoiceInput(preload_model=False)
+        # PTT mode off (default).
+        received = []
+        vi.on_text(lambda t: received.append(t))
+        vi._emit_text("save file")
+        assert received == []

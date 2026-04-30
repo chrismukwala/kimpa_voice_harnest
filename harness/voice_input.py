@@ -42,6 +42,7 @@ class VoiceInput:
         self._error_callback: Optional[Callable[[str], None]] = None
         self._recording_state_callback: Optional[Callable[[bool], None]] = None
         self._status_callback: Optional[Callable[[str], None]] = None
+        self._audio_level_callback: Optional[Callable[[float], None]] = None
 
         self._running = False
         self._paused = False
@@ -99,6 +100,10 @@ class VoiceInput:
     def on_status(self, callback: Callable[[str], None]) -> None:
         """Register callback invoked with status updates."""
         self._status_callback = callback
+
+    def on_audio_level(self, callback: Callable[[float], None]) -> None:
+        """Register callback invoked with mic RMS level (0.0-1.0) per frame while recording."""
+        self._audio_level_callback = callback
 
     def start(self) -> None:
         """Begin listening.  Spawns the listen loop in its own thread."""
@@ -254,7 +259,10 @@ class VoiceInput:
                     )
                     self._stream.start()
                     mic_open_failures = 0
-                    self._emit_recording_state(True)
+                    if not self._ptt_mode:
+                        # VAD mode: mic-open == recording-armed (dot flashes).
+                        # PTT mode: hold the button to start the visible recording state.
+                        self._emit_recording_state(True)
                     self._emit_status("listening")
                 except (RuntimeError, OSError, sd.PortAudioError) as exc:
                     mic_open_failures += 1
@@ -284,13 +292,17 @@ class VoiceInput:
                         data, overflowed = self._stream.read(SAMPLES_PER_FRAME)
                         if overflowed:
                             log.debug("Input overflow — dropped samples")
-                        speech_frames.append(data.tobytes())
+                        frame_bytes = data.tobytes()
+                        speech_frames.append(frame_bytes)
+                        self._emit_audio_level(frame_bytes)
                 except (RuntimeError, OSError) as exc:
                     log.warning("Stream read error: %s", exc)
                     self._stop_stream()
                     speech_frames = []
                 finally:
                     self._emit_recording_state(False)
+                    if self._audio_level_callback is not None:
+                        self._audio_level_callback(0.0)
                 if not speech_frames or not self._running:
                     continue
             else:
@@ -306,6 +318,7 @@ class VoiceInput:
                             log.debug("Input overflow — dropped samples")
                         frame_bytes = data.tobytes()
                         is_speech = self._vad.is_speech(frame_bytes, SAMPLE_RATE)
+                        self._emit_audio_level(frame_bytes)
                         if not speaking:
                             pre_buffer.append(frame_bytes)
                             if is_speech:
@@ -363,8 +376,9 @@ class VoiceInput:
     def _emit_text(self, text: str) -> None:
         if not text or not text.strip():
             return
-        # (A) Discard likely hallucinations / noise transcriptions
-        if len(text.strip().split()) < self._min_words:
+        # (A) Discard likely hallucinations / noise transcriptions in VAD mode only.
+        # PTT is an explicit user action — short commands ("save file") must be allowed.
+        if not self._ptt_mode and len(text.strip().split()) < self._min_words:
             log.debug("Utterance too short (%r) — discarded", text)
             return
         if self._callback is not None:
@@ -382,3 +396,19 @@ class VoiceInput:
     def _emit_status(self, status: str) -> None:
         if self._status_callback is not None:
             self._status_callback(status)
+
+    def _emit_audio_level(self, frame_bytes: bytes) -> None:
+        """Compute RMS level (0.0-1.0) from an int16 PCM frame and forward to callback."""
+        if self._audio_level_callback is None:
+            return
+        try:
+            samples = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            if samples.size == 0:
+                level = 0.0
+            else:
+                rms = float(np.sqrt(np.mean(samples * samples)))
+                # Boost for visualisation: speech RMS is typically ~0.05-0.2.
+                level = min(1.0, rms * 4.0)
+        except (ValueError, FloatingPointError):
+            level = 0.0
+        self._audio_level_callback(level)

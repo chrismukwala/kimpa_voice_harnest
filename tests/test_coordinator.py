@@ -543,9 +543,13 @@ class TestAcceptEdits:
         """Accept should return False and emit error for unwritable paths."""
         errors = []
         coordinator.error_occurred.connect(lambda msg: errors.append(msg))
-        coordinator.set_file_context("/nonexistent/dir/file.py", "content")
+        # Use a path that os.makedirs cannot create (invalid drive on Windows,
+        # invalid path char everywhere) — coordinator must surface the OSError.
+        bad_path = "Z:/__nonexistent_root__/sub/file.py"
+        coordinator.set_file_context(bad_path, "content")
 
-        result = coordinator.accept_edits("/nonexistent/dir/file.py", "content")
+        with patch("harness.coordinator.os.makedirs", side_effect=OSError("denied")):
+            result = coordinator.accept_edits(bad_path, "content")
 
         assert result is False
         assert len(errors) == 1
@@ -932,3 +936,163 @@ class TestStreamingPipeline:
         coordinator._process_message(msg)
 
         assert consumed_before_speak[0] == "First. "
+
+
+class TestModelStatus:
+    def test_refresh_model_status_emits_dict_with_three_keys(self, coordinator):
+        from PyQt6.QtTest import QSignalSpy
+        spy = QSignalSpy(coordinator.model_status_changed)
+        with patch('harness.model_manager.status', return_value={'whisper': True, 'kokoro': False, 'api_key': True}):
+            coordinator.refresh_model_status()
+        assert len(spy) == 1
+        emitted = spy[0][0]
+        assert emitted == {'whisper': True, 'kokoro': False, 'api_key': True}
+
+    def test_download_missing_models_only_downloads_missing(self, coordinator):
+        calls = []
+
+        def fake_dl_w(progress_cb=None):
+            calls.append('whisper')
+            return '/tmp/w'
+
+        def fake_dl_k(progress_cb=None):
+            calls.append('kokoro')
+            return '/tmp/k'
+
+        with patch('harness.coordinator.threading.Thread', _SyncThread), \
+             patch('harness.model_manager.whisper_present', return_value=True), \
+             patch('harness.model_manager.kokoro_present', return_value=False), \
+             patch('harness.model_manager.download_whisper', side_effect=fake_dl_w), \
+             patch('harness.model_manager.download_kokoro', side_effect=fake_dl_k), \
+             patch('harness.model_manager.status', return_value={'whisper': True, 'kokoro': True, 'api_key': False}):
+            coordinator.download_missing_models()
+        assert calls == ['kokoro']
+
+    def test_download_missing_models_emits_progress_done_signal(self, coordinator):
+        from PyQt6.QtTest import QSignalSpy
+        done_spy = QSignalSpy(coordinator.model_progress_done)
+        with patch('harness.coordinator.threading.Thread', _SyncThread), \
+             patch('harness.model_manager.whisper_present', return_value=True), \
+             patch('harness.model_manager.kokoro_present', return_value=True), \
+             patch('harness.model_manager.status', return_value={'whisper': True, 'kokoro': True, 'api_key': False}):
+            coordinator.download_missing_models()
+        assert len(done_spy) == 1
+
+    def test_download_missing_models_emits_error_on_failure(self, coordinator):
+        from PyQt6.QtTest import QSignalSpy
+        err_spy = QSignalSpy(coordinator.error_occurred)
+        with patch('harness.coordinator.threading.Thread', _SyncThread), \
+             patch('harness.model_manager.whisper_present', return_value=False), \
+             patch('harness.model_manager.kokoro_present', return_value=True), \
+             patch('harness.model_manager.download_whisper', side_effect=RuntimeError('boom')), \
+             patch('harness.model_manager.status', return_value={'whisper': False, 'kokoro': True, 'api_key': False}):
+            coordinator.download_missing_models()
+        assert len(err_spy) >= 1
+
+
+class TestRepoMapStatus:
+    def test_refresh_repo_map_emits_status_with_char_count(self, coordinator, tmp_path):
+        from PyQt6.QtTest import QSignalSpy
+        spy = QSignalSpy(coordinator.repo_map_status_changed)
+        coordinator._project_root = str(tmp_path)
+        with patch('harness.repo_map.generate_repo_map', return_value='file.py:\n  def foo'):
+            coordinator.refresh_repo_map()
+        assert len(spy) == 1
+        emitted = spy[0][0]
+        assert emitted['chars'] > 0
+        assert emitted['available'] is True
+
+    def test_refresh_repo_map_emits_unavailable_when_empty(self, coordinator, tmp_path):
+        from PyQt6.QtTest import QSignalSpy
+        spy = QSignalSpy(coordinator.repo_map_status_changed)
+        coordinator._project_root = str(tmp_path)
+        with patch('harness.repo_map.generate_repo_map', return_value=''):
+            coordinator.refresh_repo_map()
+        assert len(spy) == 1
+        assert spy[0][0]['available'] is False
+
+    def test_refresh_repo_map_no_root_emits_unavailable(self, coordinator):
+        from PyQt6.QtTest import QSignalSpy
+        spy = QSignalSpy(coordinator.repo_map_status_changed)
+        coordinator._project_root = None
+        coordinator.refresh_repo_map()
+        assert len(spy) == 1
+        assert spy[0][0]['available'] is False
+
+
+class TestFileCreation:
+    def test_create_file_block_proposes_creation_when_path_given(self, coordinator, tmp_path):
+        from PyQt6.QtTest import QSignalSpy
+        coordinator._project_root = str(tmp_path)
+        spy = QSignalSpy(coordinator.edits_proposed)
+        edits = [{
+            'search': '',
+            'replace': 'print(\"hi\")\n',
+            'path': 'newfile.py',
+            'create': True,
+        }]
+        coordinator._handle_edits(edits, context=None)
+        assert len(spy) == 1
+        proposal = spy[0][0]
+        assert proposal['create'] is True
+        assert proposal['file_path'].endswith('newfile.py')
+        assert proposal['original'] == ''
+        assert 'print' in proposal['modified']
+
+    def test_create_file_outside_project_root_rejected(self, coordinator, tmp_path):
+        from PyQt6.QtTest import QSignalSpy
+        coordinator._project_root = str(tmp_path)
+        err_spy = QSignalSpy(coordinator.error_occurred)
+        edits = [{
+            'search': '',
+            'replace': 'pwned',
+            'path': '../escape.py',
+            'create': True,
+        }]
+        coordinator._handle_edits(edits, context=None)
+        assert len(err_spy) >= 1
+
+    def test_accept_edits_creates_new_file(self, coordinator, tmp_path):
+        import git as _g
+        coordinator._project_root = str(tmp_path)
+        new_path = str(tmp_path / 'created.py')
+        with patch('harness.coordinator.git_ops.auto_commit', return_value=True), \
+             patch('harness.coordinator._git.Repo', side_effect=_g.exc.InvalidGitRepositoryError('x')):
+            ok = coordinator.accept_edits(new_path, 'print(\"hello\")\n')
+        assert ok is True
+        with open(new_path) as f:
+            assert f.read() == 'print(\"hello\")\n'
+
+
+class TestToolUse:
+    def test_process_message_uses_chat_with_tools_when_project_root_set(self, coordinator, tmp_path):
+        coordinator._project_root = str(tmp_path)
+        coordinator._api_key = 'k'
+
+        with patch('harness.coordinator.code_llm.chat_with_tools', return_value='final answer') as cwt, \
+             patch('harness.coordinator.threading.Thread', _SyncThread):
+            coordinator._process_message({'query': 'hi', 'context': None, 'repo_map': None})
+
+        assert cwt.called
+        assert cwt.call_args.kwargs['api_key'] == 'k'
+
+    def test_progress_cb_emits_short_prose_for_speech(self, coordinator, tmp_path):
+        from PyQt6.QtTest import QSignalSpy
+        coordinator._project_root = str(tmp_path)
+        coordinator._api_key = 'k'
+        prose_spy = QSignalSpy(coordinator.prose_ready)
+
+        captured_cb = {}
+
+        def fake_cwt(query, context=None, repo_map=None, api_key=None,
+                     tool_dispatcher=None, progress_cb=None, **kw):
+            captured_cb['cb'] = progress_cb
+            progress_cb('read_file', {'path': 'src/main.py'})
+            return 'ok'
+
+        with patch('harness.coordinator.code_llm.chat_with_tools', side_effect=fake_cwt), \
+             patch('harness.coordinator.threading.Thread', _SyncThread):
+            coordinator._process_message({'query': 'hi', 'context': None, 'repo_map': None})
+
+        # Must have emitted at least one prose event (could include final answer too)
+        assert any('read' in spy[0].lower() or 'src/main.py' in spy[0] for spy in prose_spy)

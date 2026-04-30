@@ -26,6 +26,9 @@ openai>=1.30.0,<2.0.0            # OpenAI-compatible SDK (used with Gemini endpo
 # --- TTS ---
 kokoro>=0.9.0,<1.0.0             # hexgrad/kokoro — Apache 2.0; requires espeak-ng system binary on Windows
 
+# --- Model downloads (lazy first-run downloader for STT/TTS) ---
+huggingface-hub>=0.23.0,<1.0.0   # Used by harness/model_manager.py for cache lookups + snapshot_download
+
 # --- Git ---
 gitpython>=3.1.40                # Auto-commit accepted edits (Phase 3a)
 
@@ -35,3 +38,6 @@ tree-sitter-languages>=1.10.0,<2.0.0  # Bundles tree-sitter + pre-compiled langu
 # --- Testing ---
 pytest>=7.0.0
 numpy>=1.24.0                    # Test fixtures (mock audio arrays)
+
+# --- Dev tooling (Phase H1 — pre-push hook) ---
+pip-audit>=2.7.0                 # Dependency vulnerability scanner; warn-only on push

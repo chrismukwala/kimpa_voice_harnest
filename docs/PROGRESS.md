@@ -19,9 +19,294 @@
 | Phase 4 | **STABILIZING** | Audio recovery, device config, indicator, and highlighting are implemented; hardware validation and UX smoothing are pending |
 | LLM Migration | **DONE** | Ollama → Gemini 2.5 Flash Lite via OpenAI SDK |
 | Phase 5 | **IMPLEMENTED / NEEDS UX STABILIZATION** | 3-model pipeline: whisper-turbo STT, Gemini Flash Lite LLM, Kokoro GPU-capable TTS |
+| Phase H1 | **DONE** | Mechanical enforcement — pre-commit/pre-push hooks, secret/forbidden/file-size scanners, smart pytest cache |
+| Phase H2 | **DONE** | Path-scoped instructions split — 5 new `.github/instructions/*.instructions.md` with `applyTo` scopes; root `copilot-instructions.md` trimmed to a pointer |
+| Phase H3 | **DONE** | Documentation hygiene — auto-generated module index in `AGENTS.md` (`scripts/lib/generate_docs.py`), drift detector (`scripts/lib/validate_docs.py`), and Docs Map block |
+| Phase H4 | **DONE** | Quality gates as tests — `tests/test_repo_hygiene.py` (function length ≤60, top-level imports ≤15, no `print()` in `harness/`/`ui/`) plus `print()` rule added to `check_forbidden.py` |
+| Phase H5 | **DONE** | Spec-driven workflow — `docs/plans/_TEMPLATE.md` plan-before-build template + `scripts/preflight.py` session-start env validator |
+| Phase H6 | **DONE** | Readiness self-assessment — `docs/READINESS.md` 8-pillar / 5-level rubric scoring the harness against its own targets |
 | Current Focus | **OPEN** | Make speaking, listening, interruption, and TTS playback feel seamless instead of clunky |
 
 ## Detailed Log
+
+### Phase H6 — Readiness Self-Assessment — DONE (2026-04-30)
+
+Implemented Phase H6 of the [Harness Engineering plan](PLAN_HARNESS_ENGINEERING.md):
+the optional readiness rubric.
+
+New files:
+- `docs/READINESS.md` — 8-pillar / 5-level self-assessment scorecard tailored
+  to Voice Harness (mechanical enforcement, test discipline, documentation
+  hygiene, quality gates, path-scoped instructions, spec-driven workflow,
+  dependency pinning, adversarial review). Each pillar links to the concrete
+  files / tests that justify its level. Aggregate score 19/32, median pillar
+  level 2.5; the document also lists the three concrete steps to lift every
+  pillar to L3.
+
+Edits:
+- `AGENTS.md` — Docs map gains a `Readiness rubric` row pointing to the new
+  file.
+
+Verification:
+- `python -m pytest tests/ -q` — expected unchanged (no Python code touched);
+  H6 is documentation-only per the plan.
+
+Plan completion: H1–H6 of `docs/PLAN_HARNESS_ENGINEERING.md` are all DONE.
+Deferred items (CI workflow, preflight-in-hook wiring) are tracked inside
+`docs/READINESS.md` itself rather than as new phases.
+
+### Phase H3 — Documentation Hygiene — DONE (2026-04-30)
+
+Implemented Phase H3 of the [Harness Engineering plan](PLAN_HARNESS_ENGINEERING.md):
+auto-generated module index + drift detector + Docs Map.
+
+New files:
+- `scripts/lib/generate_docs.py` — walks `harness/`, `ui/`, `tools/`, `scripts/`,
+  `setup/`, `phase0_poc/`, `tests/`, extracts the first non-empty line of each
+  module-level docstring (AST-based), and renders a Markdown table grouped by
+  top-level directory. Pure functions: `summarize_module`, `walk_modules`,
+  `render_modules_block`, `update_between_markers`, `regenerate_agents_md`.
+  CLI supports `--check` (exit 1 on drift) and the default rewrite mode.
+- `scripts/lib/validate_docs.py` — `drift_warning(staged)` returns a warning
+  string when `harness/*.py` is staged without `docs/PROGRESS.md`, else `None`.
+  Handles both POSIX and Windows path separators.
+- `tests/test_doc_generation.py` — 17 TDD tests covering docstring extraction,
+  module walking (sorted, no `__pycache__`/`__init__.py`), block rendering,
+  marker replacement, idempotent regeneration, and drift-warning matrix.
+
+Edits:
+- `AGENTS.md` — replaced the hand-maintained tree under "Project layout" with
+  `<!-- AUTO:modules -->` / `<!-- /AUTO:modules -->` markers populated by the
+  generator. Added a "Docs map" section linking to `docs/ARCHITECTURE.md`,
+  `CONVENTIONS.md`, `DECISIONS.md`, `SETUP.md`, `PROGRESS.md`,
+  `PLAN_AUDIO_UX.md`, `PLAN_HARNESS_ENGINEERING.md`, `REVIEW_REPORT.md`,
+  `RED_TEAM_REPORT.md`. Drift previously called out by H3.1 (missing
+  `harness/edit_applier.py`, `git_ops.py`, `llm_tools.py`, `model_manager.py`,
+  `repo_map.py` and several `tests/test_*.py`) is now resolved automatically.
+- `scripts/hooks/pre_commit.py` — drift-warning logic delegated to
+  `validate_docs.drift_warning`; behaviour unchanged (still warning-only).
+
+Verification:
+- `python scripts/lib/generate_docs.py` — populated AGENTS.md AUTO block.
+- `python -m pytest tests/test_doc_generation.py -q` — 17 passed.
+- `python -m pytest tests/ -q` — 542 passed, 1 skipped (no regressions; +17
+  tests vs. previous green at 525).
+
+Remaining H-series phases (per `docs/PLAN_HARNESS_ENGINEERING.md`):
+- **H6** — readiness rubric (optional, low priority).
+
+### Phase H5 — Spec-Driven & Subagent Workflow Alignment — DONE (2026-04-30)
+
+Implemented Phase H5 of the [Harness Engineering plan](PLAN_HARNESS_ENGINEERING.md):
+plan-before-build template + session-start preflight.
+
+New files:
+- `docs/plans/_TEMPLATE.md` — copy-and-fill plan template with the six
+  required sections (Problem, Test list, Module touch-list, Risks, Success
+  criteria, Out of scope). Formalises the "spec → execute in fresh session"
+  pattern already half-used by `PLAN_AUDIO_UX.md` /
+  `PLAN_HARNESS_ENGINEERING.md`.
+- `scripts/lib/preflight.py` — pure-function checkers exposing
+  `check_python_version`, `check_ctranslate2`, `check_tool_on_path`,
+  `check_active_venv`, `check_last_commit`, `check_pytest_collect`, plus
+  `run_all` and `format_results`. All side-effecting calls (importlib,
+  shutil.which, subprocess.run) are injected so tests stay hermetic.
+- `scripts/preflight.py` — thin CLI entry point. Exit `0` when every
+  checker passes, `1` otherwise. Run at session start to surface drift
+  between local env and `AGENTS.md` pinned constraints (Python 3.11,
+  ctranslate2 4.4.0, espeak-ng + nvcc on PATH, active venv, git HEAD,
+  pytest collect count).
+- `tests/test_preflight.py` — 19 TDD tests covering each checker's
+  pass/fail cases via fakes plus the plan-template structural assertions.
+
+Verification:
+- `python -m pytest tests/test_preflight.py -q` — 19 passed.
+- `python -m pytest tests/ -q` — 561 passed, 1 skipped (no regressions;
+  +19 tests vs. previous green at 542).
+- `python scripts/preflight.py` — runs and prints OK/FAIL grid as designed.
+
+### Phase H4 — Quality Gates as Tests — DONE (2026-04-30)
+
+Implemented Phase H4 of the [Harness Engineering plan](PLAN_HARNESS_ENGINEERING.md):
+encoded the "complexity red flags" as automated checks that run as part
+of the normal pytest suite.
+
+New file:
+- `tests/test_repo_hygiene.py` — AST-based gates over `harness/` and `ui/`:
+  - Function length ≤ 60 lines (with `LONG_FUNCTION_ALLOWLIST` grandfathering
+    7 known oversize functions: `chat_with_tools`, `_process_message`,
+    `generate_repo_map`, `_listen_loop`, `AiPanel.__init__`,
+    `_get_monaco_html`, `MainWindow.__init__`).
+  - Top-level imports per module ≤ 15 (current max is 15 in
+    `harness/coordinator.py`).
+  - No `print(` calls — production code must use `logging`.
+  - Allowlist-accuracy test prevents stale entries (allowlist must
+    point at functions that are still over the limit).
+
+Edits:
+- `scripts/lib/check_forbidden.py` — new `Rule` banning `print(` lines
+  scoped to `harness/` and `ui/`. `tools/` and `scripts/` continue to
+  print freely (CLI utilities). The `# pragma: allow forbidden` opt-out
+  still works.
+- `tests/test_hooks.py` — 4 new tests for the `print()` rule
+  (flags in harness, flags in ui, allowed in tools, allowed in scripts).
+
+Verification:
+- `python -m pytest tests/test_repo_hygiene.py tests/test_hooks.py -v`
+  — 23 passed.
+- `python -m pytest tests/ -q` — 525 passed, 1 skipped (no regressions;
+  +8 tests vs. previous green at 517).
+
+### Phase H2 — Path-Scoped Instructions — DONE (2026-04-30)
+
+Implemented Phase H2 of the [Harness Engineering plan](PLAN_HARNESS_ENGINEERING.md):
+split duplicated constraints out of `AGENTS.md` and the root
+`.github/copilot-instructions.md` into focused, path-scoped instruction files
+that auto-load only when relevant.
+
+New files (each ≤60 body lines, with YAML `description` + `applyTo` frontmatter):
+- `.github/instructions/tdd.instructions.md` — Red/Green/Refactor discipline,
+  scoped to `harness/**/*.py, ui/**/*.py`.
+- `.github/instructions/audio-stack.instructions.md` — Python 3.11,
+  `ctranslate2 == 4.4.0`, `int8_float16`, espeak-ng, sounddevice/VAD/Whisper
+  module-boundary rules. Scoped to `harness/voice_input.py`, `harness/tts.py`,
+  `harness/audio_*.py`, `harness/tts_navigator.py`, and `tools/test_*.py`.
+- `.github/instructions/qt-webengine.instructions.md` — `--in-process-gpu`,
+  `QTWEBENGINE_DISABLE_SANDBOX=1` ordering, localhost-HTTP-only Monaco,
+  `if __name__ == "__main__"` guard, GUI-thread rules. Scoped to `ui/**/*.py`,
+  `phase0_poc/**/*.py`, `main.py`.
+- `.github/instructions/coordinator-contract.instructions.md` — message shape
+  `{"query","context","repo_map"}`, Aider-style SEARCH/REPLACE format,
+  `tts.speak() -> List[Tuple[str, bytes]]` chunk shape. Scoped to coordinator,
+  LLM, edit-applier, and their tests.
+- `.github/instructions/tests.instructions.md` — mock policy, `qapp` fixture,
+  `@pytest.mark.ui`, no real network/audio, <100 ms per test. Scoped to
+  `tests/**/*.py`.
+
+Edits:
+- `.github/copilot-instructions.md` — rewritten as a lean pointer (universal
+  rules + table of scoped files); duplicated constraints removed (single source
+  of truth in the scoped files).
+- `tests/test_instructions_files.py` (new) — 18 parametric tests asserting the
+  six instruction files exist, carry quoted `description` + `applyTo` keys, and
+  stay within the 60-line body budget. Drove the implementation TDD-style.
+
+Verification:
+- `python -m pytest tests/test_instructions_files.py -q` — 18 passed.
+- `python -m pytest tests/ -q` — 517 passed, 1 skipped (no regressions).
+
+### Phase H1 — Mechanical Enforcement (git hooks) — DONE (2026-04-30)
+
+Implemented Phase H1 of the [Harness Engineering plan](PLAN_HARNESS_ENGINEERING.md):
+local pre-commit and pre-push hooks that mechanically enforce the rules in
+`AGENTS.md` and `.github/copilot-instructions.md`.
+
+New files:
+- `scripts/lib/_finding.py` — shared `Finding` dataclass.
+- `scripts/lib/check_secrets.py` — regex-based secret scanner (OpenAI/Gemini/private
+  keys + generic high-entropy assignments). `# pragma: allowlist secret` opt-out.
+- `scripts/lib/check_file_sizes.py` — per-directory line caps (400 for harness/ui/
+  tools/scripts/setup, 600 for tests). `ALLOWLIST` grandfathers four existing
+  oversize files (`harness/coordinator.py`, `ui/ai_panel.py`, `ui/main_window.py`,
+  `tests/test_coordinator.py`).
+- `scripts/lib/check_forbidden.py` — bare `except:`, `compute_type="float16"`,
+  `file://` in UI, `git add .` / `git add -A`. `# pragma: allow forbidden` opt-out.
+- `scripts/lib/test_cache.py` — SHA-256 signature of all tracked `.py` +
+  `pytest.ini`/`conftest.py`/`requirements.txt`/`main.py`. Skips pytest when
+  `.test-passed` matches the current signature.
+- `scripts/hooks/pre_commit.py` — runs the three scanners against staged files,
+  then pytest (cache-aware), then a `harness/*.py` ↔ `docs/PROGRESS.md` drift
+  warning.
+- `scripts/hooks/pre_push.py` — full `pytest tests/ -v` (cache-aware) +
+  `pip-audit -r requirements.txt` (warn-only).
+- `scripts/install_hooks.py` — writes POSIX-shell wrappers into `.git/hooks/`
+  (Git for Windows ships `sh.exe`; same wrapper works on Linux/macOS).
+- `tests/test_hooks.py` — 15 TDD tests covering the three check libraries
+  (red → green → refactor). Hook entry points are smoke-tested manually.
+
+Edits:
+- `.gitignore` — added `.test-passed`.
+- `requirements.txt` — added `pip-audit>=2.7.0` (dev tooling).
+- `docs/SETUP.md` — added "Git hooks" section pointing at
+  `python scripts/install_hooks.py`.
+
+Open questions answered before implementation: hard-block on file-size violations
+(yes), pre-push runs full suite (yes, includes `@pytest.mark.ui`), pip-audit added
+to requirements (yes), CI workflow deferred (local-only for Phase H1).
+
+Verification:
+- `python -m pytest tests/test_hooks.py -q` — 15 passed.
+- `python -m pytest tests/ -q` — 499 passed, 1 skipped (no regressions).
+- `python scripts/install_hooks.py` — installed `.git/hooks/pre-commit` and
+  `.git/hooks/pre-push`.
+- Pre-commit smoke test: ran clean against a single staged file; second run hit
+  the `.test-passed` cache (`tests: skipped`).
+- Manual scan probe: `check_secrets.scan_paths` correctly flagged a synthetic
+  `sk-...` key in a tmp file.
+
+Next phases (per `docs/PLAN_HARNESS_ENGINEERING.md`):
+- **H2** — split path-scoped instructions under `.github/instructions/`.
+- **H3** — auto-generated module index + drift detector.
+- **H4** — repo-hygiene tests (function length, imports per module).
+
+### PTT Recording Feedback + Mic Level Meter — DONE (2026-04-30)
+
+Fixed the "Hold to Talk" button giving no visible feedback and short PTT utterances
+being silently discarded.
+
+- `harness/voice_input.py`:
+  - New `on_audio_level(callback)` API; emits per-frame RMS (0.0-1.0) in both PTT and
+    VAD branches so the UI can render a live waveform/level meter.
+  - In PTT mode, `_emit_recording_state(True)` no longer fires when the mic stream
+    opens — only while the button is held — so the indicator now means "actively
+    recording", not "mic armed".
+  - `_min_words` filter is bypassed in PTT mode; short explicit commands like
+    "save file" are no longer dropped.
+- `harness/coordinator.py`: added `audio_level_changed = pyqtSignal(float)` and
+  forwarded the new callback through it.
+- `ui/ai_panel.py`:
+  - PTT button switches stylesheet + label to "● Recording..." (red, outlined) on
+    press and back to green "Hold to Talk" on release.
+  - Added a `QProgressBar`-based mic level meter under the PTT button driven by
+    `set_audio_level(level)` with smoothing + decay timer.
+- `ui/main_window.py`: wired `coordinator.audio_level_changed` →
+  `ai_panel.set_audio_level`.
+- Tests: 13 new tests across `test_voice_input.py` and `test_ai_panel.py`
+  (audio level emission, NaN safety, PTT min-words bypass, button visual state,
+  meter clamping). All 484 tests pass.
+
+### Model Presence + LLM Tool-Use Pass — DONE (2026-04-30)
+
+Addressed five user-reported gaps: STT/TTS model absence, LLM lacking file-system tools,
+LLM unable to create files, and repo map invisible to the user.
+
+Completed work (TDD, 469 passed / 1 skipped):
+- **Step A — Model presence + lazy download**: New `harness/model_manager.py` checks
+  Hugging Face cache for `Systran/faster-whisper-base.en` and `hexgrad/Kokoro-82M`, plus
+  API-key presence. AI panel shows OK/Missing for each, with a "Download Models" button
+  and progress bar wired through new coordinator signals (`model_status_changed`,
+  `model_progress`, `model_progress_done`). Auto-prompts on startup when models are
+  missing. Added `huggingface-hub>=0.23` to `requirements.txt`.
+- **Step B — Repo map status surface**: Coordinator now emits `repo_map_status_changed`
+  with `{available, chars, files}` so the AI panel always shows whether the LLM is
+  actually getting repo context (e.g. "Repo: 42 files / 8123 chars" or "Repo: None").
+- **Step C — LLM tool-calling**: New `harness/llm_tools.py` exposes 6 sandboxed tools
+  (`read_file`, `list_dir`, `search_text`, `create_file`, `delete_file`, `run_tests`)
+  guarded by `edit_applier.validate_path` + realpath/commonpath against `project_root`
+  with 256 KB / 100-result limits. `code_llm.chat_with_tools` runs the OpenAI tool-calling
+  loop (max 8 iterations) and emits `progress_cb(name, args)` per round. The coordinator
+  switches to this path when a project root is set, humanizes each tool call ("Reading
+  src/main.py."), pumps the prose into the existing TTS sentence pipeline, and routes
+  `create_file` results through the existing diff/accept flow via `_propose_create`.
+- **Step D — File creation via SEARCH/REPLACE**: Parser now accepts an optional path
+  header above the SEARCH block and treats an empty SEARCH body as a create. Coordinator
+  splits edits and routes creates through `_propose_create`, with `os.makedirs(parent,
+  exist_ok=True)` on accept and broadened git exception catch (now includes `ValueError`
+  for gitpython "dubious ownership").
+
+Test deltas: +11 model_manager, +18 llm_tools, +5 chat_with_tools, +7 coordinator
+(model status, repo map, file creation, tool-use), +6 ai_panel (model + repo UI), +3
+code_llm (file-creation parser).
 
 ### Red-Team Remediation Pass — DONE (2026-04-26)
 

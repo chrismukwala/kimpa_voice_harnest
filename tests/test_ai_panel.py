@@ -303,6 +303,64 @@ class TestRecordingIndicator:
 
 
 @pytest.mark.ui
+class TestPttButtonVisual:
+    def test_ptt_button_idle_text(self, qapp):
+        panel = AiPanel()
+        assert panel._ptt_btn.text() == "Hold to Talk"
+
+    def test_ptt_pressed_changes_text_and_emits(self, qapp):
+        panel = AiPanel()
+        spy = QSignalSpy(panel.ptt_pressed)
+
+        panel._on_ptt_pressed()
+
+        assert "Recording" in panel._ptt_btn.text()
+        assert panel._ptt_recording_style in panel._ptt_btn.styleSheet()
+        assert len(spy) == 1
+
+    def test_ptt_released_restores_idle(self, qapp):
+        panel = AiPanel()
+        spy = QSignalSpy(panel.ptt_released)
+        panel._on_ptt_pressed()
+
+        panel._on_ptt_released()
+
+        assert panel._ptt_btn.text() == "Hold to Talk"
+        assert panel._ptt_idle_style in panel._ptt_btn.styleSheet()
+        assert len(spy) == 1
+
+
+@pytest.mark.ui
+class TestAudioLevelMeter:
+    def test_initial_level_is_zero(self, qapp):
+        panel = AiPanel()
+        assert panel._level_meter.value() == 0
+
+    def test_set_audio_level_updates_meter(self, qapp):
+        panel = AiPanel()
+        panel.set_audio_level(0.6)
+        assert panel._level_meter.value() == 60
+
+    def test_set_audio_level_clamps_high(self, qapp):
+        panel = AiPanel()
+        panel.set_audio_level(2.5)
+        assert panel._level_meter.value() == 100
+
+    def test_set_audio_level_clamps_low(self, qapp):
+        panel = AiPanel()
+        panel._level_meter.setValue(40)
+        panel.set_audio_level(-1.0)
+        # Smoothing keeps part of previous value (40 * 0.7 ≈ 28).
+        assert 26 <= panel._level_meter.value() <= 30
+
+    def test_set_audio_level_invalid_input_treated_as_zero(self, qapp):
+        panel = AiPanel()
+        panel.set_audio_level(float("nan"))
+        # NaN clamps to 0.0; meter stays at 0.
+        assert panel._level_meter.value() == 0
+
+
+@pytest.mark.ui
 class TestTtsWordHighlight:
     def test_highlight_word_renders_html(self, qapp):
         panel = AiPanel()
@@ -371,3 +429,46 @@ class TestLlmSettingsControls:
         panel._llm_settings_toggle.setChecked(True)
         panel._on_llm_settings_toggled()
         assert not panel._llm_settings_panel.isHidden()
+
+
+@pytest.mark.ui
+class TestModelStatusPanel:
+    def test_set_model_status_updates_labels(self, qapp):
+        panel = AiPanel()
+        panel.set_model_status(whisper=True, kokoro=False, api_key=True)
+        assert 'OK' in panel._whisper_status_label.text() or 'Ready' in panel._whisper_status_label.text()
+        assert 'Missing' in panel._kokoro_status_label.text() or 'Not' in panel._kokoro_status_label.text()
+        assert 'OK' in panel._api_key_status_label.text() or 'Ready' in panel._api_key_status_label.text()
+
+    def test_download_models_clicked_signal(self, qapp):
+        panel = AiPanel()
+        spy = QSignalSpy(panel.download_models_requested)
+        panel._download_models_btn.click()
+        assert len(spy) == 1
+
+    def test_set_model_progress_updates_progress_bar(self, qapp):
+        panel = AiPanel()
+        panel.set_model_progress('Downloading whisper', 25, 100)
+        assert panel._model_progress_bar.value() == 25
+        assert panel._model_progress_bar.maximum() == 100
+        assert not panel._model_progress_bar.isHidden()
+
+    def test_clear_model_progress_hides_bar(self, qapp):
+        panel = AiPanel()
+        panel.set_model_progress('Downloading', 50, 100)
+        panel.clear_model_progress()
+        assert panel._model_progress_bar.isHidden()
+
+
+
+@pytest.mark.ui
+class TestRepoMapStatusUi:
+    def test_set_repo_map_status_available(self, qapp):
+        panel = AiPanel()
+        panel.set_repo_map_status(available=True, chars=4200, files=12)
+        assert '4200' in panel._repo_map_status_label.text() or '4.2k' in panel._repo_map_status_label.text() or '12' in panel._repo_map_status_label.text()
+
+    def test_set_repo_map_status_unavailable(self, qapp):
+        panel = AiPanel()
+        panel.set_repo_map_status(available=False, chars=0, files=0)
+        assert 'None' in panel._repo_map_status_label.text() or 'Missing' in panel._repo_map_status_label.text() or 'Off' in panel._repo_map_status_label.text()

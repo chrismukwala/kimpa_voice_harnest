@@ -6,6 +6,10 @@ import sys
 # Env vars that must be set before any Qt / torch imports.
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--in-process-gpu"
 os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+# Avoid hard crash from duplicate OpenMP runtimes (PyTorch + MKL both ship libiomp5md.dll
+# on Windows). Without this, loading Kokoro/torch after numpy aborts the process with
+# "OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized."
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 # OLLAMA_HOST removed — now using hosted Gemini via OpenAI SDK.
 
 from PyQt6.QtWidgets import QApplication

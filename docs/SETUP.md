@@ -33,6 +33,24 @@ The wizard performs these steps in order:
 Note: after the Phase 5 STT rewrite, the installer validation should be checked against the
 current dependency list before treating a fresh install as fully verified.
 
+## Git hooks (Phase H1)
+
+After the venv is set up, install the local pre-commit / pre-push hooks:
+
+```bash
+python scripts/install_hooks.py
+```
+
+This wires `.git/hooks/pre-commit` and `.git/hooks/pre-push` to:
+
+- **pre-commit** — secret scan, forbidden-pattern scan, file-size limits, and
+  `pytest tests/ -q` (skipped via `.test-passed` cache when nothing changed).
+- **pre-push** — full `pytest tests/ -v` and `pip-audit -r requirements.txt`
+  (audit is warn-only).
+
+Re-run `python scripts/install_hooks.py` any time the wrapper logic changes.
+The cache file `.test-passed` is gitignored.
+
 ## Running the App
 
 ```bash

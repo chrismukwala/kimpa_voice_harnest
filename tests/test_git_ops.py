@@ -44,7 +44,7 @@ class TestAutoCommit:
         )
 
         mock_repo.index.add.assert_called_once_with(["src/main.py"])
-        mock_repo.index.commit.assert_called_once_with("fix: update main function")
+        mock_repo.git.commit.assert_called_once_with("-m", "fix: update main function")
 
     @patch("harness.git_ops.git.Repo")
     def test_uses_default_message(self, MockRepo):
@@ -53,12 +53,13 @@ class TestAutoCommit:
 
         auto_commit(repo_path="/project", file_path="test.py")
 
-        call_args = mock_repo.index.commit.call_args
-        assert "Voice Harness" in call_args[0][0]
+        call_args = mock_repo.git.commit.call_args
+        assert call_args[0][0] == "-m"
+        assert "Voice Harness" in call_args[0][1]
 
     @patch("harness.git_ops.git.Repo")
     def test_does_not_stage_all(self, MockRepo):
-        """Must never do git add . — only stage specific files."""
+        """Must never do git add . — only stage specific files."""  # pragma: allow forbidden
         mock_repo = MagicMock()
         MockRepo.return_value = mock_repo
 

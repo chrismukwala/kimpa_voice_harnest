@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QLineEdit,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QToolButton,
     QVBoxLayout,
@@ -37,6 +38,7 @@ class AiPanel(QWidget):
     wake_word_toggled = pyqtSignal(bool)
     api_key_changed = pyqtSignal(str)
     auto_submit_requested = pyqtSignal(str)
+    download_models_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -146,6 +148,50 @@ class AiPanel(QWidget):
         self._api_key_clear_btn.clicked.connect(self._on_api_key_clear)
         llm_layout.addWidget(self._api_key_clear_btn, 0, 3)
         layout.addWidget(self._llm_settings_panel)
+
+        # --- Models status group ---
+        models_row = QHBoxLayout()
+        models_row.setSpacing(8)
+        models_row.addWidget(QLabel("Models:"))
+
+        self._whisper_status_label = QLabel("STT: ?")
+        self._whisper_status_label.setFont(QFont("Consolas", 10))
+        models_row.addWidget(self._whisper_status_label)
+
+        self._kokoro_status_label = QLabel("TTS: ?")
+        self._kokoro_status_label.setFont(QFont("Consolas", 10))
+        models_row.addWidget(self._kokoro_status_label)
+
+        self._api_key_status_label = QLabel("Key: ?")
+        self._api_key_status_label.setFont(QFont("Consolas", 10))
+        models_row.addWidget(self._api_key_status_label)
+
+        self._repo_map_status_label = QLabel("Repo: ?")
+        self._repo_map_status_label.setFont(QFont("Consolas", 10))
+        models_row.addWidget(self._repo_map_status_label)
+
+        models_row.addStretch()
+
+        self._download_models_btn = QPushButton("Download missing models")
+        self._download_models_btn.setStyleSheet(
+            "QPushButton { background:#0e639c; color:white; padding:4px 10px;"
+            " border-radius:3px; border:none; font-size:11px; }"
+            "QPushButton:hover { background:#1177bb; }"
+            "QPushButton:disabled { background:#444444; color:#888888; }"
+        )
+        self._download_models_btn.clicked.connect(self.download_models_requested)
+        models_row.addWidget(self._download_models_btn)
+        layout.addLayout(models_row)
+
+        self._model_progress_bar = QProgressBar()
+        self._model_progress_bar.setTextVisible(True)
+        self._model_progress_bar.setStyleSheet(
+            "QProgressBar { background:#252526; color:#d4d4d4; border:1px solid #3c3c3c;"
+            " border-radius:3px; text-align:center; }"
+            "QProgressBar::chunk { background:#0e639c; }"
+        )
+        self._model_progress_bar.hide()
+        layout.addWidget(self._model_progress_bar)
 
         self._error_banner = QLabel("")
         self._error_banner.setWordWrap(True)
@@ -293,15 +339,36 @@ class AiPanel(QWidget):
 
         # --- PTT button ---
         self._ptt_btn = QPushButton("Hold to Talk")
-        self._ptt_btn.setStyleSheet(
+        self._ptt_idle_style = (
             "QPushButton { background:#2d6a2d; color:white; padding:6px 16px;"
             " font-weight:bold; border-radius:3px; border:none; }"
-            "QPushButton:pressed { background:#3a8c3a; }"
             "QPushButton:hover { background:#357035; }"
         )
-        self._ptt_btn.pressed.connect(self.ptt_pressed)
-        self._ptt_btn.released.connect(self.ptt_released)
+        self._ptt_recording_style = (
+            "QPushButton { background:#c24038; color:white; padding:6px 16px;"
+            " font-weight:bold; border-radius:3px; border:2px solid #ff7a70; }"
+        )
+        self._ptt_btn.setStyleSheet(self._ptt_idle_style)
+        self._ptt_btn.pressed.connect(self._on_ptt_pressed)
+        self._ptt_btn.released.connect(self._on_ptt_released)
         layout.addWidget(self._ptt_btn)
+
+        # --- Mic level meter (shows live waveform energy while recording) ---
+        self._level_meter = QProgressBar()
+        self._level_meter.setRange(0, 100)
+        self._level_meter.setValue(0)
+        self._level_meter.setTextVisible(False)
+        self._level_meter.setFixedHeight(8)
+        self._level_meter.setStyleSheet(
+            "QProgressBar { background:#1e1e1e; border:1px solid #3c3c3c;"
+            " border-radius:3px; }"
+            "QProgressBar::chunk { background:#4ec9b0; border-radius:2px; }"
+        )
+        layout.addWidget(self._level_meter)
+
+        self._level_decay_timer = QTimer(self)
+        self._level_decay_timer.setInterval(60)
+        self._level_decay_timer.timeout.connect(self._decay_level)
 
         # --- Pause button ---
         self._pause_btn = QPushButton("Pause Listening")
@@ -329,6 +396,39 @@ class AiPanel(QWidget):
         self._recording_active = active
         self._sync_recording_indicator()
 
+    def set_audio_level(self, level: float) -> None:
+        """Update the live mic level meter (0.0-1.0)."""
+        try:
+            raw = float(level)
+        except (TypeError, ValueError):
+            raw = 0.0
+        if raw != raw:  # NaN check
+            raw = 0.0
+        value = max(0.0, min(1.0, raw))
+        # Smooth visual: take max of new sample and decayed previous value.
+        current = self._level_meter.value() / 100.0
+        smoothed = max(value, current * 0.7)
+        self._level_meter.setValue(int(smoothed * 100))
+        if smoothed > 0.0 and not self._level_decay_timer.isActive():
+            self._level_decay_timer.start()
+
+    def _decay_level(self) -> None:
+        current = self._level_meter.value()
+        if current <= 0:
+            self._level_decay_timer.stop()
+            return
+        self._level_meter.setValue(max(0, int(current * 0.75)))
+
+    def _on_ptt_pressed(self) -> None:
+        self._ptt_btn.setText("● Recording...")
+        self._ptt_btn.setStyleSheet(self._ptt_recording_style)
+        self.ptt_pressed.emit()
+
+    def _on_ptt_released(self) -> None:
+        self._ptt_btn.setText("Hold to Talk")
+        self._ptt_btn.setStyleSheet(self._ptt_idle_style)
+        self.ptt_released.emit()
+
     def populate_query(self, text: str) -> None:
         """Put STT transcription into the query box for user review before sending."""
         self._input.setText(text)
@@ -348,6 +448,44 @@ class AiPanel(QWidget):
         """Hide the current error banner."""
         self._error_banner.clear()
         self._error_banner.hide()
+
+    # ------------------------------------------------------------------
+    # Model status panel
+    # ------------------------------------------------------------------
+    def set_model_status(self, whisper: bool, kokoro: bool, api_key: bool) -> None:
+        """Update the three status indicators in the Models row."""
+        ok_style = "color:#608b4e;"
+        bad_style = "color:#f14c4c;"
+        self._whisper_status_label.setText(f"STT: {'OK' if whisper else 'Missing'}")
+        self._whisper_status_label.setStyleSheet(ok_style if whisper else bad_style)
+        self._kokoro_status_label.setText(f"TTS: {'OK' if kokoro else 'Missing'}")
+        self._kokoro_status_label.setStyleSheet(ok_style if kokoro else bad_style)
+        self._api_key_status_label.setText(f"Key: {'OK' if api_key else 'Missing'}")
+        self._api_key_status_label.setStyleSheet(ok_style if api_key else bad_style)
+        self._download_models_btn.setEnabled(not (whisper and kokoro))
+
+    def set_model_progress(self, label: str, current: int, total: int) -> None:
+        """Show download progress for STT/TTS models."""
+        self._model_progress_bar.setMaximum(max(total, 1))
+        self._model_progress_bar.setValue(current)
+        self._model_progress_bar.setFormat(f"{label} %p%")
+        self._model_progress_bar.show()
+
+    def clear_model_progress(self) -> None:
+        """Hide the model download progress bar."""
+        self._model_progress_bar.hide()
+        self._model_progress_bar.reset()
+
+    def set_repo_map_status(self, available: bool, chars: int, files: int) -> None:
+        """Update the Repo-map status indicator."""
+        ok_style = "color:#608b4e;"
+        bad_style = "color:#f14c4c;"
+        if available:
+            self._repo_map_status_label.setText(f"Repo: {files} files / {chars} chars")
+            self._repo_map_status_label.setStyleSheet(ok_style)
+        else:
+            self._repo_map_status_label.setText("Repo: None")
+            self._repo_map_status_label.setStyleSheet(bad_style)
 
     def append_transcription(self, text: str) -> None:
         """Show what the user said."""

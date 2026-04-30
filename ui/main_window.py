@@ -148,6 +148,7 @@ class MainWindow(QMainWindow):
         # --- Wire coordinator signals → UI ---
         coordinator.state_changed.connect(self._ai_panel.set_state)
         coordinator.recording_active_changed.connect(self._ai_panel.set_recording_active)
+        coordinator.audio_level_changed.connect(self._ai_panel.set_audio_level)
         coordinator.transcription_ready.connect(self._ai_panel.populate_query)
         coordinator.llm_response_ready.connect(self._ai_panel.append_response)
         coordinator.error_occurred.connect(self._on_error_occurred)
@@ -168,6 +169,11 @@ class MainWindow(QMainWindow):
         self._ai_panel.output_device_changed.connect(self._on_output_device_changed)
         self._ai_panel.wake_word_toggled.connect(self._on_wake_word_toggled)
         self._ai_panel.api_key_changed.connect(self._on_api_key_changed)
+        self._ai_panel.download_models_requested.connect(coordinator.download_missing_models)
+        coordinator.model_status_changed.connect(self._on_model_status_changed)
+        coordinator.model_progress.connect(self._ai_panel.set_model_progress)
+        coordinator.model_progress_done.connect(self._ai_panel.clear_model_progress)
+        coordinator.repo_map_status_changed.connect(self._on_repo_map_status_changed)
 
         # --- Sync editor content to coordinator on text change ---
         self._editor.content_changed.connect(self._sync_editor_context)
@@ -201,6 +207,16 @@ class MainWindow(QMainWindow):
                   context=ctx).activated.connect(self._on_tts_escape)
 
         self._initialize_audio_settings()
+
+        # Push initial model-status snapshot to the UI.
+        coordinator.refresh_model_status()
+        # If anything is missing, kick off the download in the background.
+        try:
+            from harness import model_manager as _mm
+            if not (_mm.whisper_present() and _mm.kokoro_present()):
+                coordinator.download_missing_models()
+        except (OSError, RuntimeError, ImportError) as exc:
+            log.warning("Initial model presence check failed: %s", exc)
 
     # ------------------------------------------------------------------
     # File tree
@@ -288,6 +304,20 @@ class MainWindow(QMainWindow):
         self._coordinator.set_api_key(key or None)
         message = "API key cleared" if not key else "API key saved"
         self.statusBar().showMessage(message, 5000)
+
+    def _on_model_status_changed(self, summary: dict) -> None:
+        self._ai_panel.set_model_status(
+            whisper=bool(summary.get("whisper")),
+            kokoro=bool(summary.get("kokoro")),
+            api_key=bool(summary.get("api_key")),
+        )
+
+    def _on_repo_map_status_changed(self, summary: dict) -> None:
+        self._ai_panel.set_repo_map_status(
+            available=bool(summary.get("available")),
+            chars=int(summary.get("chars", 0)),
+            files=int(summary.get("files", 0)),
+        )
 
     # ------------------------------------------------------------------
     # Keep coordinator's file context in sync with editor

@@ -69,3 +69,6 @@ QtWebEngine/
 *.tmp
 *.bak
 *~
+
+# Phase H1 — local-only test cache (SHA of tracked .py files)
+.test-passed
